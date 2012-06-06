@@ -385,7 +385,7 @@ public:
 
     virtual void gotObject( const BSONObj& obj ) {
         if (_db == "-") {
-            cout << obj;
+            cout << obj << endl;
             return;
         }
 
