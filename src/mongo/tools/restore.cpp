@@ -295,6 +295,7 @@ public:
 
         // print to stdout
         if (use_db && _db == "-") {
+            processFile( root );
             return;
         }
 
