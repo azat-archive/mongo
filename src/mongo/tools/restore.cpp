@@ -385,7 +385,7 @@ public:
 
     virtual void gotObject( const BSONObj& obj ) {
         if (_db == "-") {
-            cout << obj << endl;
+            cout << obj.jsonString(Strict, true) << endl;
             return;
         }
 
