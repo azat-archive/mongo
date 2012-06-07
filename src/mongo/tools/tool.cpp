@@ -78,7 +78,7 @@ namespace mongo {
 
         if ( access & SPECIFY_DBCOL )
             _options->add_options()
-            ("db,d",po::value<string>(), "database to use" )
+            ("db,d",po::value<string>(), "database to use (for write '-' - for stdout)" )
             ("collection,c",po::value<string>(), "collection to use (some commands)" )
             ;
 
