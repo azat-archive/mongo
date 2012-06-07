@@ -56,6 +56,7 @@ CONF=/etc/mongodb.conf
 DATA=/var/lib/mongodb
 LOGDIR=/var/log/mongodb
 PIDFILE=/var/run/$NAME.pid
+LOCKFILE=$DATA/mongod.lock
 LOGFILE=$LOGDIR/$NAME.log  # Server logfile
 ENABLE_MONGODB=yes
 
@@ -69,8 +70,9 @@ fi
 NUMACTL_ARGS="--interleave=all"
 if which numactl >/dev/null 2>/dev/null && numactl $NUMACTL_ARGS ls / >/dev/null 2>/dev/null
 then
-    NUMACTL="numactl $NUMACTL_ARGS"
+    NUMACTL="`which numactl` -- $NUMACTL_ARGS -- "
 else
+    DAEMON_OPTS="-- $DAEMON_OPTS"
     NUMACTL=""
 fi
 
@@ -128,8 +130,8 @@ running() {
 start_server() {
 # Start the process using the wrapper
             start-stop-daemon --background --start --quiet --pidfile $PIDFILE \
-                        --make-pidfile --chuid $DAEMONUSER \
-                        --exec $NUMACTL $DAEMON -- $DAEMON_OPTS
+                        --chuid $DAEMONUSER \
+                        --exec $NUMACTL $DAEMON $DAEMON_OPTS
             errcode=$?
 	return $errcode
 }
@@ -178,6 +180,7 @@ case "$1" in
             # this code will detect this issue if STARTTIME is set
             # to a reasonable value
             [ -n "$STARTTIME" ] && sleep $STARTTIME # Wait some time 
+            cp $LOCKFILE $PIDFILE # Copy pid from lockfile
             if  running ;  then
                 # It's ok, the server started and is running
                 log_end_msg 0
@@ -223,6 +226,7 @@ case "$1" in
         [ -n "$DIETIME" ] && sleep $DIETIME
         start_server || errcode=$?
         [ -n "$STARTTIME" ] && sleep $STARTTIME
+        cp $LOCKFILE $PIDFILE # Copy pid from lockfile
         running || errcode=$?
         log_end_msg $errcode
 	;;
