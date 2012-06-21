@@ -41,79 +41,120 @@ namespace mongo {
         if ( database == "config" )
             return configServerPtr;
 
-        uassert( 15918 , str::stream() << "invalid database name: " << database , NamespaceString::validDBName( database ) );
+        uassert( 15918,
+                 str::stream() << "invalid database name: " << database,
+                 NamespaceString::validDBName( database ) );
 
         scoped_lock l( _lock );
 
-        DBConfigPtr& cc = _databases[database];
-        if ( !cc ) {
-            cc.reset(new DBConfig( database ));
-            if ( ! cc->load() ) {
-                if ( create ) {
-                    // note here that cc->primary == 0.
-                    log() << "couldn't find database [" << database << "] in config db" << endl;
+        DBConfigPtr& dbConfig = _databases[database];
+        if( ! dbConfig ){
 
-                    {
-                        // lets check case
-                        scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getScopedDbConnection(
-                                configServer.modelServer() ));
-                        BSONObjBuilder b;
-                        b.appendRegex( "_id" , (string)"^" +
-                                       pcrecpp::RE::QuoteMeta( database ) + "$" , "i" );
-                        BSONObj d = conn->get()->findOne( ShardNS::database , b.obj() );
-                        conn->done();
+            dbConfig.reset(new DBConfig( database ));
 
-                        if ( ! d.isEmpty() ) {
-                            cc.reset();
-                            stringstream ss;
-                            ss <<  "can't have 2 databases that just differ on case "
-                               << " have: " << d["_id"].String()
-                               << " want to add: " << database;
+            // Protect initial load from connectivity errors
+            bool loaded = false;
+            try {
+                loaded = dbConfig->load();
+            }
+            catch( DBException& e ){
+                e.addContext( "error loading initial database config information" );
+                warning() << e.what() << endl;
+                dbConfig.reset();
+                throw;
+            }
 
-                            uasserted( DatabaseDifferCaseCode ,ss.str() );
+            if( ! loaded ){
+
+                if( create ){
+
+                    // Protect creation of initial db doc from connectivity errors
+                    try{
+
+                        // note here that cc->primary == 0.
+                        log() << "couldn't find database [" << database << "] in config db" << endl;
+
+                        {
+                            // lets check case
+                            scoped_ptr<ScopedDbConnection> conn(
+                                    ScopedDbConnection::getInternalScopedDbConnection(
+                                            configServer.modelServer() ));
+
+                            BSONObjBuilder b;
+                            b.appendRegex( "_id" , (string)"^" +
+                                           pcrecpp::RE::QuoteMeta( database ) + "$" , "i" );
+                            BSONObj d = conn->get()->findOne( ShardNS::database , b.obj() );
+                            conn->done();
+
+                            if ( ! d.isEmpty() ) {
+                                uasserted( DatabaseDifferCaseCode, str::stream()
+                                    <<  "can't have 2 databases that just differ on case "
+                                    << " have: " << d["_id"].String()
+                                    << " want to add: " << database );
+                            }
+                        }
+
+                        Shard primary;
+                        if ( database == "admin" ) {
+                            primary = configServer.getPrimary();
+
+                        }
+                        else if ( shardNameHint.empty() ) {
+                            primary = Shard::pick();
+
+                        }
+                        else {
+                            // use the shard name if provided
+                            Shard shard;
+                            shard.reset( shardNameHint );
+                            primary = shard;
+                        }
+
+                        if ( primary.ok() ) {
+                            dbConfig->setPrimary( primary.getName() ); // saves 'cc' to configDB
+                            log() << "\t put [" << database << "] on: " << primary << endl;
+                        }
+                        else {
+                            uasserted( 10185 ,  "can't find a shard to put new db on" );
                         }
                     }
-
-                    Shard primary;
-                    if ( database == "admin" ) {
-                        primary = configServer.getPrimary();
-
-                    }
-                    else if ( shardNameHint.empty() ) {
-                        primary = Shard::pick();
-
-                    }
-                    else {
-                        // use the shard name if provided
-                        Shard shard;
-                        shard.reset( shardNameHint );
-                        primary = shard;
-                    }
-
-                    if ( primary.ok() ) {
-                        cc->setPrimary( primary.getName() ); // saves 'cc' to configDB
-                        log() << "\t put [" << database << "] on: " << primary << endl;
-                    }
-                    else {
-                        cc.reset();
-                        log() << "\t can't find a shard to put new db on" << endl;
-                        uasserted( 10185 ,  "can't find a shard to put new db on" );
+                    catch( DBException& e ){
+                        e.addContext( "error creating initial database config information" );
+                        warning() << e.what() << endl;
+                        dbConfig.reset();
+                        throw;
                     }
                 }
                 else {
-                    cc.reset();
+                    dbConfig.reset();
                 }
             }
-
         }
 
-        return cc;
+        return dbConfig;
     }
 
     void Grid::removeDB( string database ) {
         uassert( 10186 ,  "removeDB expects db name" , database.find( '.' ) == string::npos );
         scoped_lock l( _lock );
         _databases.erase( database );
+
+    }
+
+    void Grid::removeDBIfExists( const DBConfig& database ) {
+
+        scoped_lock l( _lock );
+
+        map<string,DBConfigPtr>::iterator it = _databases.find( database.getName() );
+        if( it != _databases.end() && it->second.get() == &database ){
+
+            _databases.erase( it );
+            log() << "erased database " << database.getName() << " from local registry" << endl;
+        }
+        else{
+
+            log() << database.getName() << "already erased from local registry" << endl;
+        }
 
     }
 
@@ -142,7 +183,7 @@ namespace mongo {
         vector<string> dbNames;
         try {
             scoped_ptr<ScopedDbConnection> newShardConnPtr(
-                    ScopedDbConnection::getScopedDbConnection( servers.toString() ) );
+                    ScopedDbConnection::getInternalScopedDbConnection( servers.toString() ) );
             ScopedDbConnection& newShardConn = *newShardConnPtr;
             newShardConn->getLastError();
 
@@ -319,7 +360,7 @@ namespace mongo {
         BSONObj shardDoc = b.obj();
 
         {
-            scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getScopedDbConnection(
+            scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getInternalScopedDbConnection(
                     configServer.getPrimary().getConnString() ) );
 
             // check whether the set of hosts (or single host) is not an already a known shard
@@ -358,7 +399,7 @@ namespace mongo {
     }
 
     bool Grid::knowAboutShard( const string& name ) const {
-        scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getScopedDbConnection(
+        scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getInternalScopedDbConnection(
                 configServer.getPrimary().getConnString() ) );
         BSONObj shard = conn->get()->findOne( ShardNS::shard , BSON( "host" << name ) );
         conn->done();
@@ -371,7 +412,7 @@ namespace mongo {
         bool ok = false;
         int count = 0;
 
-        scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getScopedDbConnection(
+        scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getInternalScopedDbConnection(
                 configServer.getPrimary().getConnString() ) );
         BSONObj o = conn->get()->findOne( ShardNS::shard ,
                                           Query( fromjson ( "{_id: /^shard/}" ) )
@@ -397,9 +438,9 @@ namespace mongo {
      * Returns whether balancing is enabled, with optional namespace "ns" parameter for balancing on a particular
      * collection.
      */
-    bool Grid::shouldBalance( const string& ns ) const {
+    bool Grid::shouldBalance( const string& ns, BSONObj* balancerDocOut ) const {
 
-        scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getScopedDbConnection(
+        scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getInternalScopedDbConnection(
                 configServer.getPrimary().getConnString() ) );
         BSONObj balancerDoc;
         BSONObj collDoc;
@@ -418,6 +459,9 @@ namespace mongo {
             // if anything goes wrong, we shouldn't try balancing
             return false;
         }
+
+        if ( balancerDocOut )
+            *balancerDocOut = balancerDoc;
 
         boost::posix_time::ptime now = boost::posix_time::second_clock::local_time();
         if ( _balancerStopped( balancerDoc ) || ! _inBalancingWindow( balancerDoc , now ) ) {
@@ -489,7 +533,7 @@ namespace mongo {
     }
 
     unsigned long long Grid::getNextOpTime() const {
-        scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getScopedDbConnection(
+        scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getInternalScopedDbConnection(
                 configServer.getPrimary().getConnString() ) );
 
         BSONObj result;
@@ -511,7 +555,7 @@ namespace mongo {
     }
 
     BSONObj Grid::getConfigSetting( string name ) const {
-        scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getScopedDbConnection(
+        scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getInternalScopedDbConnection(
                 configServer.getPrimary().getConnString() ) );
         BSONObj result = conn->get()->findOne( ShardNS::settings, BSON( "_id" << name ) );
         conn->done();

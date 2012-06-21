@@ -23,6 +23,7 @@
 #include "../db/memconcept.h"
 #include "mongo/util/timer.h"
 #include "mongo/util/concurrency/remap_lock.h"
+#include "mongo/util/file_allocator.h"
 
 namespace mongo {
 
@@ -135,6 +136,7 @@ namespace mongo {
     void* MemoryMappedFile::map(const char *filenameIn, unsigned long long &length, int options) {
         verify( fd == 0 && len == 0 ); // can't open more than once
         setFilename(filenameIn);
+        FileAllocator::get()->allocateAsap( filenameIn, length );
         /* big hack here: Babble uses db names with colons.  doesn't seem to work on windows.  temporary perhaps. */
         char filename[256];
         strncpy(filename, filenameIn, 255);
@@ -257,12 +259,21 @@ namespace mongo {
             size_t protectSize = protectEnd - protectStart;
             dassert(protectSize>0&&protectSize<=MemoryMappedFile::ChunkSize);
 
-            DWORD old;
-            bool ok = VirtualProtect((void*)protectStart, protectSize, PAGE_WRITECOPY, &old);
-            if( !ok ) {
-                DWORD e = GetLastError();
-                log() << "VirtualProtect failed (mcw) " << mmf->filename() << ' ' << chunkno << hex << protectStart << ' ' << protectSize << ' ' << errnoWithDescription(e) << endl;
-                verify(false);
+            DWORD oldProtection;
+            bool ok = VirtualProtect( reinterpret_cast<void*>( protectStart ),
+                                      protectSize,
+                                      PAGE_WRITECOPY,
+                                      &oldProtection );
+            if ( !ok ) {
+                DWORD dosError = GetLastError();
+                log() << "VirtualProtect for " << mmf->filename()
+                        << " chunk " << chunkno
+                        << " failed with " << errnoWithDescription( dosError )
+                        << " (chunk size is " << protectSize
+                        << ", address is " << hex << protectStart << dec << ")"
+                        << " in mongo::makeChunkWritable, terminating"
+                        << endl;
+                fassertFailed( 16362 );
             }
         }
 

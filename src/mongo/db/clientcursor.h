@@ -286,9 +286,9 @@ namespace mongo {
          * NOTE: copied from BSONObj::extractFields
         */
         BSONObj extractFields(const BSONObj &pattern , bool fillWithNull = false) ;
-        
-        void fillQueryResultFromObj( BufBuilder &b ) const;
-        
+
+        void fillQueryResultFromObj( BufBuilder &b, const MatchDetails* details = NULL ) const;
+
         bool currentIsDup() { return _c->getsetdup( _c->currLoc() ); }
 
         bool currentMatches() {
@@ -419,11 +419,6 @@ namespace mongo {
     public:
         shared_ptr<ParsedQuery> pq;
         shared_ptr<Projection> fields; // which fields query wants returned
-        // TODO Maybe helper objects should manage their own memory rather than rely on the
-        // original message being valid.
-        Message originalMessage; // this is effectively an auto ptr for data the matcher points to
-
-
 
     private: // static members
 

@@ -113,8 +113,15 @@ namespace mongo {
                                 const string& versionedNS, const BSONObj& filter,
                                 map<Shard,BSONObj>& results )
         {
+            const BSONObj& commandWithAuth = ClientBasic::getCurrent()->getAuthenticationInfo()->
+                    getAuthTable().copyCommandObjAddingAuth( command );
 
-            QuerySpec qSpec( db + ".$cmd", command, BSONObj(), 0, 1, options );
+            QuerySpec qSpec( db + ".$cmd",
+                             noauth ? command : commandWithAuth,
+                             BSONObj(),
+                             0,
+                             1,
+                             options );
 
             ParallelSortClusteredCursor cursor( qSpec, CommandInfo( versionedNS, filter ) );
 
@@ -136,8 +143,44 @@ namespace mongo {
             // for now has same semantics as legacy request
             ChunkManagerPtr info = r.getChunkManager();
 
+            //
+            // TODO: Cleanup and consolidate into single codepath
+            //
+
             if( ! info ){
-                SINGLE->getMore( r );
+
+                const char *ns = r.getns();
+
+                LOG(3) << "single getmore: " << ns << endl;
+
+                long long id = r.d().getInt64( 4 );
+
+                string host = cursorCache.getRef( id );
+
+                if( host.size() == 0 ){
+
+                    //
+                    // Match legacy behavior here by throwing an exception when we can't find
+                    // the cursor, but make the exception more informative
+                    //
+
+                    uasserted( 16336,
+                               str::stream() << "could not find cursor in cache for id " << id
+                                             << " over collection " << ns );
+                }
+
+                // we used ScopedDbConnection because we don't get about config versions
+                // not deleting data is handled elsewhere
+                // and we don't want to call setShardVersion
+                scoped_ptr<ScopedDbConnection> conn(
+                        ScopedDbConnection::getScopedDbConnection( host ) );
+
+                Message response;
+                bool ok = conn->get()->callRead( r.m() , response);
+                uassert( 10204 , "dbgrid: getmore: error calling db", ok);
+                r.reply( response , "" /*conn->getServerAddress() */ );
+
+                conn->done();
                 return;
             }
             else {
@@ -173,12 +216,54 @@ namespace mongo {
             }
         }
 
-        ChunkManagerPtr _groupInserts( const string& ns,
-                                       vector<BSONObj>& inserts,
-                                       map<ChunkPtr,vector<BSONObj> >& insertsForChunks,
-                                       ChunkManagerPtr& manager,
-                                       ShardPtr& primary,
-                                       bool reloadedConfigData = false )
+        /**
+         * Invoked before mongos needs to throw an error relating to an operation which cannot
+         * be performed on a sharded collection.
+         *
+         * This prevents mongos from refreshing config data too quickly in response to bad requests,
+         * since doing so is expensive.
+         *
+         * TODO: Can we restructure to make this simpler?
+         */
+        void _sleepForVerifiedLocalError(){
+            sleepsecs( 1 );
+        }
+
+        void _handleRetries( const string& op,
+                             int retries,
+                             const string& ns,
+                             const BSONObj& query,
+                             StaleConfigException& e,
+                             Request& r ) // TODO: remove
+        {
+
+            static const int MAX_RETRIES = 5;
+            if( retries >= MAX_RETRIES ) throw e;
+
+            //
+            // On a stale config exception, we have to assume that the entire collection could have
+            // become unsharded, or sharded with a different shard key - we need to re-run all the
+            // targeting we've done earlier
+            //
+
+            log( retries == 0 ) << op << " will be retried b/c sharding config info is stale, "
+                                << " retries: " << retries
+                                << " ns: " << ns
+                                << " data: " << query << endl;
+
+            if( retries > 2 ){
+                versionManager.forceRemoteCheckShardVersionCB( ns );
+            }
+
+            r.reset();
+        }
+
+        void _groupInserts( const string& ns,
+                            vector<BSONObj>& inserts,
+                            map<ChunkPtr,vector<BSONObj> >& insertsForChunks,
+                            ChunkManagerPtr& manager,
+                            ShardPtr& primary,
+                            bool reloadedConfigData = false )
         {
 
             grid.getDBConfig( ns )->getChunkManagerOrPrimary( ns, manager, primary );
@@ -249,12 +334,22 @@ namespace mongo {
 
                         // If this is our retry, force talking to the config server
                         grid.getDBConfig( ns )->getChunkManagerIfExists( ns, true );
-                        return _groupInserts( ns, inserts, insertsForChunks, manager, primary, true );
+                        _groupInserts( ns, inserts, insertsForChunks, manager, primary, true );
+                        return;
                     }
 
                     if( bad ){
-                        log() << "tried to insert object with no valid shard key for " << manager->getShardKey() << " : " << o << endl;
-                        uassert( 8011, str::stream() << "tried to insert object with no valid shard key for " << manager->getShardKey().toString() << " : " << o.toString(), false );
+
+                        // Sleep to avoid DOS'ing config server when we have invalid inserts
+                        _sleepForVerifiedLocalError();
+
+                        // TODO: Matching old behavior, but do we need this log line?
+                        log() << "tried to insert object with no valid shard key for "
+                              << manager->getShardKey() << " : " << o << endl;
+
+                        uasserted( 8011,
+                              str::stream() << "tried to insert object with no valid shard key for "
+                                            << manager->getShardKey().toString() << " : " << o.toString() );
                     }
                 }
 
@@ -269,25 +364,64 @@ namespace mongo {
             }
 
             inserts.clear();
-            return manager;
+            return;
         }
 
-        void _insert( Request& r , DbMessage& d, vector<BSONObj>& insertsRemaining, map<ChunkPtr, vector<BSONObj> > insertsForChunks, int retries = 0 ) {
+        /**
+         * This insert function now handes all inserts, unsharded or sharded, through mongos.
+         *
+         * Semantics for insert are ContinueOnError - to match mongod semantics :
+         * 1) Error is thrown immediately for corrupt objects
+         * 2) Error is thrown only for UserExceptions during the insert process, if last obj had error that's thrown
+         */
+        void _insert( Request& r , DbMessage& d ){
 
+            const string& ns = r.getns();
+
+            vector<BSONObj> insertsRemaining;
+            while ( d.moreJSObjs() ){
+                insertsRemaining.push_back( d.nextJsObj() );
+            }
+
+            int flags = 0;
+
+            if( d.reservedField() & Reserved_InsertOption_ContinueOnError )
+                flags |= InsertOption_ContinueOnError;
+
+            if( d.reservedField() & Reserved_FromWriteback )
+                flags |= WriteOption_FromWriteback;
+
+            _insert( ns, insertsRemaining, flags, r, d );
+        }
+
+        void _insert( const string& ns,
+                      vector<BSONObj>& inserts,
+                      int flags,
+                      Request& r , DbMessage& d ) // TODO: remove
+        {
+            map<ChunkPtr, vector<BSONObj> > insertsForChunks; // Map for bulk inserts to diff chunks
+            _insert( ns, inserts, insertsForChunks, flags, r, d );
+        }
+
+        void _insert( const string& ns,
+                      vector<BSONObj>& insertsRemaining,
+                      map<ChunkPtr, vector<BSONObj> >& insertsForChunks,
+                      int flags,
+                      Request& r, DbMessage& d, // TODO: remove
+                      int retries = 0 )
+        {
             // TODO: Replace this with a better check to see if we're making progress
             uassert( 16055, str::stream() << "too many retries during bulk insert, " << insertsRemaining.size() << " inserts remaining", retries < 30 );
             uassert( 16056, str::stream() << "shutting down server during bulk insert, " << insertsRemaining.size() << " inserts remaining", ! inShutdown() );
 
             ChunkManagerPtr manager;
             ShardPtr primary;
-            const string& ns = r.getns();
 
             // This function handles grouping the inserts per-shard whether the collection is sharded or not.
             _groupInserts( ns, insertsRemaining, insertsForChunks, manager, primary );
 
             // ContinueOnError is always on when using sharding.
-            const int flags = d.reservedField() |
-                              ( manager ? InsertOption_ContinueOnError : 0 );
+            flags |= manager ? InsertOption_ContinueOnError : 0;
 
             while( ! insertsForChunks.empty() ){
 
@@ -304,13 +438,26 @@ namespace mongo {
 
                 try {
 
-                    LOG(4) << "  server:" << shard << " bulk insert " << objs.size() << " documents" << endl;
+                    LOG(4) << "inserting " << objs.size() << " documents to shard " << shard
+                           << " at version "
+                           << ( manager.get() ? manager->getVersion().toString() :
+                                                ShardChunkVersion( 0, OID() ).toString() ) << endl;
 
                     // Taken from single-shard bulk insert, should not need multiple methods in future
                     // insert( c->getShard() , r.getns() , objs , flags);
 
                     // It's okay if the version is set here, an exception will be thrown if the version is incompatible
-                    dbcon.setVersion();
+                    try{
+                        dbcon.setVersion();
+                    }
+                    catch ( StaleConfigException& e ) {
+                        // External try block is still needed to match bulk insert mongod
+                        // behavior
+                        dbcon.done();
+                        _handleRetries( "insert", retries, ns, objs[0], e, r );
+                        _insert( ns, insertsRemaining, insertsForChunks, flags, r, d, retries + 1 );
+                        return;
+                    }
 
                     // Certain conn types can't handle bulk inserts, so don't use unless we need to
                     if( objs.size() == 1 ){
@@ -337,33 +484,7 @@ namespace mongo {
                         c->splitIfShould( bytesWritten );
 
                 }
-                catch ( StaleConfigException& e ) {
-                    // Cleanup the connection
-                    dbcon.done();
-
-                    // For legacy reasons, we may not always get a namespace in the exception :-(
-                    string staleNS = e.getns();
-                    if( staleNS.size() == 0 ) staleNS = ns;
-
-                    // Assume the inserts did *not* succeed, so we don't want to erase them
-
-                    int logLevel = retries < 2;
-                    LOG( logLevel ) << "retrying bulk insert of " << objs.size() << " documents to chunk " << c << " because of StaleConfigException: " << e << endl;
-
-                    if( retries > 2 ){
-                        versionManager.forceRemoteCheckShardVersionCB( staleNS );
-                    }
-
-                    // TODO: Replace with actual chunk handling code, simplify request
-                    // TODO: The way in which we clear shards here needs to change.  Not an issue for single-inserts
-                    r.reset();
-
-                    // We may need to regroup at least some of our inserts since our chunk manager may have changed,
-                    // or may no longer exist
-                    _insert( r, d, insertsRemaining, insertsForChunks, retries + 1 );
-                    return;
-                }
-                catch( UserException& ){
+                catch( UserException& e ){
                     // Unexpected exception, so don't clean up the conn
                     dbcon.kill();
 
@@ -374,214 +495,474 @@ namespace mongo {
                     if( insertsForChunks.empty() ){
                         throw;
                     }
+
+                    //
+                    // WE SWALLOW THE EXCEPTION HERE BY DESIGN
+                    // to match mongod behavior
+                    //
+                    // TODO: Make better semantics
+                    //
+
+                    warning() << "swallowing exception during batch insert"
+                              << causedBy( e ) << endl;
                 }
 
                 insertsForChunks.erase( insertsForChunks.begin() );
             }
         }
 
-        /**
-         * This insert function now handes all inserts, unsharded or sharded, through mongos.
-         *
-         * Semantics for insert are ContinueOnError - to match mongod semantics :
-         * 1) Error is thrown immediately for corrupt objects
-         * 2) Error is thrown only for UserExceptions during the insert process, if last obj had error that's thrown
-         */
-        void _insert( Request& r , DbMessage& d ){
+        void _prepareUpdate( const string& ns,
+                             const BSONObj& query,
+                             const BSONObj& toUpdate,
+                             int flags,
+                             // Output
+                             ChunkPtr& chunk,
+                             ShardPtr& shard,
+                             ChunkManagerPtr& manager,
+                             ShardPtr& primary,
+                             // Input
+                             bool reloadConfigData = false )
+        {
+            //
+            // Updates have three basic targeting options :
+            // 1) Primary shard
+            // 2) Single shard in collection
+            // 3) All shards in cluster
+            //
+            // We don't (currently) target just a few shards because on retry we'd need to ensure that we didn't send
+            // the update to a shard twice.
+            //
+            // TODO: Think this is fixable, if we better track where we're sending requests.
+            // TODO: Async connection layer with error checking would make this much simpler.
+            //
 
-            vector<BSONObj> insertsRemaining;
-            while ( d.moreJSObjs() ){
-                insertsRemaining.push_back( d.nextJsObj() );
+            // Refresh config if specified
+            if( reloadConfigData ) grid.getDBConfig( ns )->getChunkManagerIfExists( ns, true );
+
+            bool multi = flags & UpdateOption_Multi;
+            bool upsert = flags & UpdateOption_Upsert;
+
+            grid.getDBConfig( ns )->getChunkManagerOrPrimary( ns, manager, primary );
+
+            chunk.reset();
+            shard.reset();
+
+            // Unsharded updates just go to the one primary shard
+            if( ! manager ){
+                shard = primary;
+                return;
             }
 
-            map<ChunkPtr, vector<BSONObj> > insertsForChunks; // Map for bulk inserts to diff chunks
+            BSONObj shardKey;
+            const ShardKeyPattern& skPattern = manager->getShardKey();
 
-            _insert( r, d, insertsRemaining, insertsForChunks );
-        }
+            if( toUpdate.firstElementFieldName()[0] == '$') {
 
-        void _update( Request& r , DbMessage& d, ChunkManagerPtr manager ) {
-            // const details of the request
-            const int flags = d.pullInt();
-            const BSONObj query = d.nextJsObj();
-            uassert( 10201 ,  "invalid update" , d.moreJSObjs() );
-            const BSONObj toupdate = d.nextJsObj();
-            const bool upsert = flags & UpdateOption_Upsert;
-            const bool multi = flags & UpdateOption_Multi;
+                //
+                // $op style update
+                //
 
-            uassert( 13506 ,  "$atomic not supported sharded" , !query.hasField("$atomic") );
+                // Validate all top-level is of style $op
+                BSONForEach(op, toUpdate){
 
-            // This are used for routing the request and are listed in order of priority
-            // If one is empty, go to next. If both are empty, send to all shards
-            BSONObj key; // the exact shard key
-            BSONObj chunkFinder; // a query listing
+                    uassert( 16064,
+                             "can't mix $operator style update with non-$op fields",
+                             op.fieldName()[0] == '$' );
 
-            const ShardKeyPattern& sk = manager->getShardKey();
+                    if( op.type() != Object ) continue;
 
-            if (toupdate.firstElementFieldName()[0] == '$') { // $op style update
-                chunkFinder = query;
-
-                BSONForEach(op, toupdate){
-                    // this block is all about validation
-                    uassert(16064, "can't mix $operator style update with non-$op fields", op.fieldName()[0] == '$');
-                    if (op.type() != Object)
-                        continue;
-                    BSONForEach(field, op.embeddedObject()){
-                        if (sk.partOfShardKey(field.fieldName()))
-                            uasserted(13123, str::stream() << "Can't modify shard key's value. field: " << field
-                                                            << " collection: " << manager->getns());
+                    BSONForEach( field, op.embeddedObject() ){
+                        if( skPattern.partOfShardKey( field.fieldName() ) )
+                            uasserted( 13123, str::stream() << "Can't modify shard key's value. field: " << field
+                                                            << " collection: " << manager->getns() );
                     }
                 }
 
-                if (sk.hasShardKey(query))
-                    key = sk.extractKey(query);
+                if( skPattern.hasShardKey( query ) ) shardKey = skPattern.extractKey( query );
 
-                if (!multi){
+                if( ! multi ){
+
+                    //
                     // non-multi needs full key or _id. The _id exception because that guarantees
                     // that only one object will be updated even if we send to all shards
                     // Also, db.foo.update({_id:'asdf'}, {$inc:{a:1}}) is a common pattern that we
                     // need to allow, even if it is less efficient than if the shard key were supplied.
-                    const bool hasId = query.hasField("_id") && getGtLtOp(query["_id"]) == BSONObj::Equality;
-                    uassert(8013, "For non-multi updates, must have _id or full shard key in query", hasId || !key.isEmpty());
-                }
-            }
-            else { // replace style update
-                uassert(16065, "multi-updates require $ops rather than replacement object", !multi);
+                    //
 
-                uassert(12376, str::stream() << "full shard key must be in update object for collection: " << manager->getns(),
-                        sk.hasShardKey(toupdate));
+                    bool hasId = query.hasField( "_id" ) && getGtLtOp( query["_id"] ) == BSONObj::Equality;
 
-                key = sk.extractKey(toupdate);
+                    if( ! hasId && shardKey.isEmpty() ){
 
-                BSONForEach(field, query){
-                    if (!sk.partOfShardKey(field.fieldName()) || getGtLtOp(field) != BSONObj::Equality)
-                        continue;
-                    uassert(8014, str::stream() << "cannot modify shard key for collection: " << manager->getns(),
-                            field == key[field.fieldName()]);
-                }
-
-            }
-
-            const int LEFT_START = 5;
-            int left = LEFT_START;
-            while ( true ) {
-                try {
-                    Shard shard;
-                    ChunkPtr c;
-                    if ( key.isEmpty() ) {
-                        uassert(8012, "can't upsert something without full valid shard key", !upsert);
-
-                        set<Shard> shards;
-                        manager->getShardsForQuery(shards, query);
-                        if (shards.size() == 1) {
-                            shard = *shards.begin();
-                        }
-                        else{
-                            // data could be on more than one shard. must send to all
-                            int * x = (int*)(r.d().afterNS());
-                            x[0] |= UpdateOption_Broadcast; // this means don't check shard version in mongod
-                            broadcastWrite(dbUpdate, r);
+                        // Retry reloading the config data once, in case the shard key
+                        // has changed on us in the meantime
+                        if( ! reloadConfigData ){
+                            _prepareUpdate( ns, query, toUpdate, flags, chunk, shard, manager, primary, true );
                             return;
                         }
+
+                        // Sleep here, to rate-limit the amount of bad updates we process and avoid pounding the
+                        // config server
+                        _sleepForVerifiedLocalError();
+
+                        uasserted( 8013,
+                          str::stream() << "For non-multi updates, must have _id or full shard key "
+                                        << "(" << skPattern.toString() << ") in query" );
                     }
-                    else {
-                        uassert(16066, "", sk.hasShardKey(key));
-                        c = manager->findChunk( key );
-                        shard = c->getShard();
-                    }
-
-                    verify(shard != Shard());
-                    doWrite( dbUpdate , r , shard );
-
-                    if ( c &&r.getClientInfo()->autoSplitOk() )
-                        c->splitIfShould( d.msg().header()->dataLen() );
-
-                    return;
-                }
-                catch ( StaleConfigException& e ) {
-                    if ( left <= 0 )
-                        throw e;
-                    log( left == LEFT_START ) << "update will be retried b/c sharding config info is stale, "
-                                              << " left:" << left - 1 << " ns: " << r.getns() << " query: " << query << endl;
-                    left--;
-                    r.reset();
-                    manager = r.getChunkManager();
-                    uassert(14806, "collection no longer sharded", manager);
                 }
             }
-        }
+            else {
 
-        void _delete( Request& r , DbMessage& d, ChunkManagerPtr manager ) {
+                //
+                // replace style update
+                //
 
-            int flags = d.pullInt();
-            bool justOne = flags & 1;
+                uassert( 16065, "multi-updates require $ops rather than replacement object", ! multi );
 
-            uassert( 10203 ,  "bad delete message" , d.moreJSObjs() );
-            BSONObj pattern = d.nextJsObj();
-            uassert( 13505 ,  "$atomic not supported sharded" , pattern["$atomic"].eoo() );
+                if( ! skPattern.hasShardKey( toUpdate ) ){
 
-            const int LEFT_START = 5;
-            int left = LEFT_START;
-            while ( true ) {
-                try {
-                    set<Shard> shards;
-                    manager->getShardsForQuery( shards , pattern );
-                    LOG(2) << "delete : " << pattern << " \t " << shards.size() << " justOne: " << justOne << endl;
-
-                    if ( shards.size() != 1 ) {
-                        // data could be on more than one shard. must send to all
-                        if ( justOne && ! pattern.hasField( "_id" ) )
-                            throw UserException( 8015 , "can only delete with a non-shard key pattern if can delete as many as we find" );
-
-                        int * x = (int*)(r.d().afterNS());
-                        x[0] |= RemoveOption_Broadcast; // this means don't check shard version in mongod
-                        broadcastWrite(dbUpdate, r);
+                    // Retry reloading the config data once
+                    if( ! reloadConfigData ){
+                        _prepareUpdate( ns, query, toUpdate, flags, chunk, shard, manager, primary, true );
                         return;
                     }
 
-                    doWrite( dbDelete , r , *shards.begin() );
+                    // Sleep here
+                    _sleepForVerifiedLocalError();
+
+                    uasserted( 12376,
+                         str::stream() << "full shard key must be in update object for collection: "
+                                       << manager->getns() );
+                }
+
+                shardKey = skPattern.extractKey( toUpdate );
+
+                BSONForEach(field, query){
+
+                    if( ! skPattern.partOfShardKey( field.fieldName() ) || getGtLtOp( field ) != BSONObj::Equality )
+                        continue;
+
+                    if( field != shardKey[ field.fieldName() ] ){
+
+                        // Retry reloading the config data once
+                        if( ! reloadConfigData ){
+                            _prepareUpdate( ns, query, toUpdate, flags, chunk, shard, manager, primary, true );
+                            return;
+                        }
+
+                        // Sleep here
+                        _sleepForVerifiedLocalError();
+
+                        uasserted( 8014, str::stream() << "cannot modify shard key for collection "
+                                                       << manager->getns()
+                                                       << ", found new value for "
+                                                       << field.fieldName() );
+                    }
+                }
+            }
+
+            //
+            // We've now collected an exact shard key from the update or not.
+            // If we've collected an exact shard key, find the chunk it goes to.
+            // If we haven't collected an exact shard key, find the shard we go to
+            //   If we don't have a single shard to go to, don't send back a shard
+            //
+
+            verify( manager );
+            if( ! shardKey.isEmpty() ){
+
+                chunk = manager->findChunk( shardKey );
+                shard = ShardPtr( new Shard( chunk->getShard() ) );
+                return;
+            }
+            else {
+
+                if( upsert ){
+
+                    // We need a shard key for upsert
+
+                    // Retry reloading the config data once
+                    if( ! reloadConfigData ){
+                        _prepareUpdate( ns, query, toUpdate, flags, chunk, shard, manager, primary, true );
+                        return;
+                    }
+
+                    _sleepForVerifiedLocalError();
+
+                    uasserted( 8012, str::stream()
+                        << "can't upsert something without full valid shard key : " << query );
+                }
+
+                set<Shard> shards;
+                manager->getShardsForQuery( shards, query );
+
+                verify( shards.size() > 0 );
+
+                // Return if we have a single shard
+                if( shards.size() == 1 ){
+                    shard = ShardPtr( new Shard( *shards.begin() ) );
                     return;
                 }
-                catch ( StaleConfigException& e ) {
-                    if ( left <= 0 )
-                        throw e;
-                    log( left == LEFT_START ) << "delete will be retried b/c of StaleConfigException, "
-                                              << " left:" << left - 1 << " ns: " << r.getns() << " patt: " << pattern << endl;
-                    left--;
-                    r.reset();
-                    manager = r.getChunkManager();
-                    uassert(14805, "collection no longer sharded", manager);
+
+                if( query.hasField("$atomic") ){
+
+                    // We can't run an atomic operation on more than one shard
+
+                    // Retry reloading the config data once
+                    if( ! reloadConfigData ){
+                        _prepareUpdate( ns, query, toUpdate, flags, chunk, shard, manager, primary, true );
+                        return;
+                    }
+
+                    _sleepForVerifiedLocalError();
+
+                    uasserted( 13506, str::stream()
+                        << "$atomic not supported sharded : " << query );
                 }
+
+                return;
             }
         }
 
-        virtual void writeOp( int op , Request& r ) {
+        void _update( Request& r , DbMessage& d ){
 
-            ChunkManagerPtr info;
+            // const details of the request
+            const string& ns = r.getns();
+            int flags = d.pullInt();
+            const BSONObj query = d.nextJsObj();
+
+            uassert( 10201 ,  "invalid update" , d.moreJSObjs() );
+
+            const BSONObj toUpdate = d.nextJsObj();
+
+            if( d.reservedField() & Reserved_FromWriteback ){
+                flags |= WriteOption_FromWriteback;
+            }
+
+            _update( ns, query, toUpdate, flags, r, d );
+        }
+
+        void _update( const string& ns,
+                      const BSONObj& query,
+                      const BSONObj& toUpdate,
+                      int flags,
+                      Request& r, DbMessage& d, // TODO: remove
+                      int retries = 0 )
+        {
+
+            ChunkPtr chunk;
+            ShardPtr shard;
+            ChunkManagerPtr manager;
             ShardPtr primary;
+
+            _prepareUpdate( ns, query, toUpdate, flags, chunk, shard, manager, primary );
+
+            if( ! shard ){
+
+                //
+                // Without a shard, target all shards
+                //
+
+                //
+                // data could be on more than one shard. must send to all
+                // TODO: make this safer w/ shard add/remove
+                //
+
+                int* opts = (int*)( r.d().afterNS() );
+                opts[0] |= UpdateOption_Broadcast; // this means don't check shard version in mongod
+                broadcastWrite( dbUpdate, r );
+                return;
+            }
+
+            ShardConnection dbcon( *shard, ns, manager );
+
+            //
+            // Assuming we detect on mongod sharded->unsharded and unsharded->sharded, we should
+            // be okay here.
+            // MovePrimary will mess this up though, along with other things.
+            //
+
+            try {
+                // An exception will be thrown if the version is incompatible
+                dbcon.setVersion();
+            }
+            catch ( StaleConfigException& e ) {
+
+                dbcon.done();
+                _handleRetries( "update", retries, ns, query, e, r );
+                _update( ns, query, toUpdate, flags, r, d, retries + 1 );
+                return;
+            }
+
+            dbcon->update( ns, query, toUpdate, flags );
+
+            dbcon.done();
+
+            if( chunk && r.getClientInfo()->autoSplitOk() )
+                chunk->splitIfShould( d.msg().header()->dataLen() );
+        }
+
+
+        void _prepareDelete( const string& ns,
+                             const BSONObj& query,
+                             int flags,
+                             ShardPtr& shard,
+                             ChunkManagerPtr& manager,
+                             ShardPtr& primary,
+                             bool reloadConfigData = false )
+        {
+
+            //
+            // Deletes also have three basic targeting options :
+            // 1) Primary shard
+            // 2) Single shard in collection
+            // 3) All shards in cluster
+            //
+            // We don't (currently) target just a few shards because on retry we'd need to ensure that we didn't send
+            // the delete to a shard twice.
+            //
+            // TODO: Think this is fixable, if we better track where we're sending requests.
+            // TODO: Async connection layer with error checking would make this much simpler.
+            //
+
+            // Refresh config if specified
+            if( reloadConfigData ) grid.getDBConfig( ns )->getChunkManagerIfExists( ns, true );
+
+            bool justOne = flags & RemoveOption_JustOne;
+
+            shard.reset();
+            grid.getDBConfig( ns )->getChunkManagerOrPrimary( ns, manager, primary );
+
+            if( primary ){
+
+                shard = primary;
+                return;
+            }
+
+            set<Shard> shards;
+            manager->getShardsForQuery( shards, query );
+
+            LOG(2) << "delete : " << query << " \t " << shards.size() << " justOne: " << justOne << endl;
+
+            if( shards.size() == 1 ){
+
+                shard = ShardPtr( new Shard( *shards.begin() ) );
+                return;
+            }
+
+            if( query.hasField( "$atomic" ) ){
+
+                // Retry reloading the config data once
+                if( ! reloadConfigData ){
+                    _prepareDelete( ns, query, flags, shard, manager, primary, true );
+                    return;
+                }
+
+                // Sleep so we don't DOS config server
+                _sleepForVerifiedLocalError();
+
+                uasserted( 13505, str::stream()
+                    << "$atomic not supported for sharded delete : " << query );
+            }
+            else if( justOne && ! query.hasField( "_id" ) ){
+
+                // Retry reloading the config data once
+                if( ! reloadConfigData ){
+                    _prepareDelete( ns, query, flags, shard, manager, primary, true );
+                    return;
+                }
+
+                // Sleep so we don't DOS config server
+                _sleepForVerifiedLocalError();
+
+                uasserted( 8015, str::stream()
+                    << "can only delete with a non-shard key pattern if can " <<
+                       "delete as many as we find : " << query );
+            }
+        }
+
+        void _delete( Request& r , DbMessage& d ) {
+
+            // details of the request
+            const string& ns = r.getns();
+            int flags = d.pullInt();
+
+            uassert( 10203 ,  "bad delete message" , d.moreJSObjs() );
+
+            const BSONObj query = d.nextJsObj();
+
+            if( d.reservedField() & Reserved_FromWriteback ){
+                flags |= WriteOption_FromWriteback;
+            }
+
+            _delete( ns, query, flags, r, d );
+        }
+
+        void _delete( const string &ns,
+                      const BSONObj& query,
+                      int flags,
+                      Request& r, DbMessage& d, // todo : remove
+                      int retries = 0 )
+        {
+            ShardPtr shard;
+            ChunkManagerPtr manager;
+            ShardPtr primary;
+
+            _prepareDelete( ns, query, flags, shard, manager, primary );
+
+            if( ! shard ){
+
+                int * x = (int*)(r.d().afterNS());
+                x[0] |= RemoveOption_Broadcast; // this means don't check shard version in mongod
+                // TODO: Why is this an update op here?
+                broadcastWrite( dbUpdate, r );
+                return;
+            }
+
+            ShardConnection dbcon( *shard, ns, manager );
+
+            try {
+                // An exception will be thrown if the version is incompatible
+                dbcon.setVersion();
+            }
+            catch ( StaleConfigException& e ) {
+                dbcon.done();
+                _handleRetries( "delete", retries, ns, query, e, r );
+                _delete( ns, query, flags, r, d, retries + 1 );
+                return;
+            }
+
+            dbcon->remove( ns, query, flags );
+
+            dbcon.done();
+        }
+
+
+
+        virtual void writeOp( int op , Request& r ) {
 
             const char *ns = r.getns();
 
-            r.getConfig()->getChunkManagerOrPrimary( r.getns(), info, primary );
             // TODO: Index write logic needs to be audited
-            bool isIndexWrite = strstr( ns , ".system.indexes" ) == strchr( ns , '.' ) && strchr( ns , '.' );
+            bool isIndexWrite =
+                    strstr( ns , ".system.indexes" ) == strchr( ns , '.' ) && strchr( ns , '.' );
 
-            // TODO: This block goes away, we need to handle the case where we go sharded->unsharded or
-            // vice-versa for all types of write operations.  System.indexes may be the only special case.
-            if( primary && ( isIndexWrite || op != dbInsert ) ){
+            // TODO: This block goes away, system.indexes needs to handle better
+            if( isIndexWrite ){
 
-                if ( r.isShardingEnabled() && isIndexWrite ){
-                    LOG(1) << " .system.indexes write for: " << ns << endl;
+                if ( r.getConfig()->isShardingEnabled() ){
+                    LOG(1) << "sharded index write for " << ns << endl;
                     handleIndexWrite( op , r );
                     return;
                 }
 
-                LOG(3) << "single write: " << ns << endl;
-                SINGLE->doWrite( op , r , *primary );
+                LOG(3) << "single index write for " << ns << endl;
+                SINGLE->doWrite( op , r , Shard( r.getConfig()->getPrimary() ) );
                 r.gotInsert(); // Won't handle mulit-insert correctly. Not worth parsing the request.
 
                 return;
             }
             else{
+
                 LOG(3) << "write: " << ns << endl;
 
                 DbMessage& d = r.d();
@@ -590,10 +971,10 @@ namespace mongo {
                     _insert( r , d );
                 }
                 else if ( op == dbUpdate ) {
-                    _update( r , d , info );
+                    _update( r , d );
                 }
                 else if ( op == dbDelete ) {
-                    _delete( r , d , info );
+                    _delete( r , d );
                 }
                 else {
                     log() << "sharding can't do write op: " << op << endl;
@@ -635,15 +1016,14 @@ namespace mongo {
                 }
             }
             else if ( op == dbUpdate ) {
-                throw UserException( 8050 , "can't update system.indexes" );
+                uasserted( 8050 , "can't update system.indexes" );
             }
             else if ( op == dbDelete ) {
-                // TODO
-                throw UserException( 8051 , "can't delete indexes on sharded collection yet" );
+                uasserted( 8051 , "can't delete indexes on sharded collection yet" );
             }
             else {
                 log() << "handleIndexWrite invalid write op: " << op << endl;
-                throw UserException( 8052 , "handleIndexWrite invalid write op" );
+                uasserted( 8052 , "handleIndexWrite invalid write op" );
             }
 
         }

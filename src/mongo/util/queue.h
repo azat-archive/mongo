@@ -43,14 +43,17 @@ namespace mongo {
         BlockingQueue() :
             _lock("BlockingQueue"),
             _maxSize(std::numeric_limits<std::size_t>::max()),
+            _currentSize(0),
             _getSize(&_getSizeDefault) {}
         BlockingQueue(size_t size) :
             _lock("BlockingQueue(bounded)"),
             _maxSize(size),
+            _currentSize(0),
             _getSize(&_getSizeDefault) {}
         BlockingQueue(size_t size, getSizeFunc f) :
             _lock("BlockingQueue(custom size)"),
             _maxSize(size),
+            _currentSize(0),
             _getSize(f) {}
 
         void push(T const& t) {
@@ -134,6 +137,8 @@ namespace mongo {
             return true;
         }
 
+        // Obviously, this should only be used when you have
+        // only one consumer
         bool blockingPeek(T& t, int maxSecondsToWait) {
             Timer timer;
 
@@ -145,6 +150,19 @@ namespace mongo {
             while( _queue.empty() ) {
                 if ( ! _cvNoLongerEmpty.timed_wait( l.boost() , xt ) )
                     return false;
+            }
+
+            t = _queue.front();
+            return true;
+        }
+
+        // Obviously, this should only be used when you have
+        // only one consumer
+        bool peek(T& t) {
+
+            scoped_lock l( _lock );
+            if (_queue.empty()) {
+                return false;
             }
 
             t = _queue.front();

@@ -25,6 +25,7 @@
 
 #include "../db/namespace.h"
 #include "../client/model.h"
+#include "mongo/client/dbclient_rs.h"
 
 #include "chunk.h"
 #include "shard.h"
@@ -38,6 +39,7 @@ namespace mongo {
         static string database;
         static string collection;
         static string chunk;
+        static string tags;
 
         static string mongos;
         static string settings;
@@ -130,7 +132,7 @@ namespace mongo {
             return _shardingEnabled;
         }
 
-        void enableSharding();
+        void enableSharding( bool save = true );
         ChunkManagerPtr shardCollection( const string& ns , ShardKeyPattern fieldsAndOrder , bool unique , vector<BSONObj>* initPoints=0, vector<Shard>* initShards=0 );
 
         /**

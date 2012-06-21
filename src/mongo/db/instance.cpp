@@ -241,7 +241,7 @@ namespace mongo {
         shared_ptr<AssertionException> ex;
 
         try {
-            dbresponse.exhaust = runQuery(m, q, op, *resp);
+            dbresponse.exhaustNS = runQuery(m, q, op, *resp);
             verify( !resp->empty() );
         }
         catch ( SendStaleConfigException& e ){
@@ -457,7 +457,7 @@ namespace mongo {
         logThreshold += currentOp.getExpectedLatencyMs();
 
         if ( shouldLog || debug.executionTime > logThreshold ) {
-            mongo::tlog() << debug << endl;
+            mongo::tlog() << debug.report( currentOp ) << endl;
         }
 
         if ( currentOp.shouldDBProfile( debug.executionTime ) ) {
@@ -734,7 +734,7 @@ namespace mongo {
         
         if( exhaust ) {
             curop.debug().exhaust = true;
-            dbresponse.exhaust = ns;
+            dbresponse.exhaustNS = ns;
         }
 
         return ok;
@@ -896,10 +896,13 @@ namespace mongo {
     unsigned long long DBDirectClient::count(const string &ns, const BSONObj& query, int options, int limit, int skip ) {
         Lock::DBRead lk( ns );
         string errmsg;
-        long long res = runCount( ns.c_str() , _countCmd( ns , query , options , limit , skip ) , errmsg );
-        if ( res == -1 )
+        int errCode;
+        long long res = runCount( ns.c_str() , _countCmd( ns , query , options , limit , skip ) , errmsg, errCode );
+        if ( res == -1 ) {
+            // namespace doesn't exist
             return 0;
-        uassert( 13637 , str::stream() << "count failed in DBDirectClient: " << errmsg , res >= 0 );
+        }
+        massert( errCode , str::stream() << "count failed in DBDirectClient: " << errmsg , res >= 0 );
         return (unsigned long long )res;
     }
 

@@ -50,7 +50,11 @@ namespace mongo {
     ThreadLocalValue<StackChecker *> checker;
 
     struct StackChecker { 
+#if defined(_WIN32)
+        enum { SZ = 256 * 1024 };
+#else
         enum { SZ = 192 * 1024 };
+#endif
         char buf[SZ];
         StackChecker() { 
             checker.set(this);
@@ -126,7 +130,11 @@ namespace mongo {
     {
         _hasWrittenThisPass = false;
         _pageFaultRetryableSection = 0;
-        _connectionId = setThreadName(desc);
+        _connectionId = p ? p->connectionId() : 0;
+        
+        if ( str::equals( "conn" , desc ) && _connectionId > 0 )
+            _desc = str::stream() << desc << _connectionId;
+        setThreadName(_desc.c_str());
         _curOp = new CurOp( this );
 #ifndef _WIN32
         stringstream temp;
@@ -321,6 +329,7 @@ namespace mongo {
     
     Client::Context::~Context() {
         DEV verify( _client == currentClient.get() );
+        _client->_curOp->recordGlobalTime( _timer.micros() );
         _client->_curOp->leave( this );
         _client->_context = _oldContext; // note: _oldContext may be null
     }
@@ -376,23 +385,6 @@ namespace mongo {
         if ( !c )
             return "no client";
         return c->toString();
-    }
-
-    Client* curopWaitingForLock( char type ) {
-        Client * c = currentClient.get();
-        verify( c );
-        CurOp * co = c->curop();
-        if ( co ) {
-            co->waitingForLock( type );
-        }
-        return c;
-    }
-
-    void curopGotLock(Client *c) {
-        verify(c);
-        CurOp * co = c->curop();
-        if ( co )
-            co->gotLock();
     }
 
     void KillCurrentOp::interruptJs( AtomicUInt *op ) {
@@ -485,8 +477,7 @@ namespace mongo {
             ss << "<tr align='left'>"
                << th( a("", "Connections to the database, both internal and external.", "Client") )
                << th( a("http://www.mongodb.org/display/DOCS/Viewing+and+Terminating+Current+Operation", "", "OpId") )
-               << "<th>Active</th>"
-               << "<th>LockType</th>"
+               << "<th>Locking</th>"
                << "<th>Waiting</th>"
                << "<th>SecsRunning</th>"
                << "<th>Op</th>"
@@ -506,11 +497,7 @@ namespace mongo {
 
                     tablecell( ss , co.opNum() );
                     tablecell( ss , co.active() );
-                    {
-                        char lt = co.lockType();
-                        tablecell(ss, lt ? lt : ' ');
-                    }
-                    tablecell( ss , co.isWaitingForLock() );
+                    tablecell( ss , c->lockState().reportState() );
                     if ( co.active() )
                         tablecell( ss , co.elapsedSeconds() );
                     else
@@ -545,10 +532,9 @@ namespace mongo {
             scoped_lock bl(clientsMutex);
             for ( set<Client*>::iterator i=clients.begin(); i!=clients.end(); ++i ) {
                 Client* c = *i;
-                if ( c->curop()->isWaitingForLock() ) {
+                if ( c->lockState().hasLockPending() ) {
                     num++;
-                    char lt = c->curop()->lockType();
-                    if( lt == 'w' || lt == 'W' )
+                    if ( c->lockState().hasAnyWriteLock() )
                         w++;
                     else
                         r++;
@@ -585,10 +571,9 @@ namespace mongo {
             if ( ! c->curop()->active() )
                 continue;
 
-            char lt = c->curop()->lockType();
-            if ( lt == 'w' || lt == 'W' )
+            if ( c->lockState().hasAnyWriteLock() )
                 writers++;
-            else if ( lt == 'r' || lt == 'R' )
+            if ( c->lockState().hasAnyReadLock() )
                 readers++;
         }
 
@@ -647,7 +632,7 @@ namespace mongo {
 
 #define OPDEBUG_TOSTRING_HELP(x) if( x >= 0 ) s << " " #x ":" << (x)
 #define OPDEBUG_TOSTRING_HELP_BOOL(x) if( x ) s << " " #x ":" << (x)
-    string OpDebug::toString() const {
+    string OpDebug::report( const CurOp& curop ) const {
         StringBuilder s;
         if ( iscommand )
             s << "command ";
@@ -691,12 +676,18 @@ namespace mongo {
             if ( exceptionInfo.code )
                 s << " code:" << exceptionInfo.code;
         }
+
+        if ( curop.numYields() )
+            s << " numYields: " << curop.numYields();
+        
+        s << " ";
+        curop.lockStat().report( s );
         
         OPDEBUG_TOSTRING_HELP( nreturned );
         if ( responseLength > 0 )
             s << " reslen:" << responseLength;
         s << " " << executionTime << "ms";
-
+        
         return s.str();
     }
 
@@ -731,6 +722,9 @@ namespace mongo {
         OPDEBUG_APPEND_BOOL( upsert );
         OPDEBUG_APPEND_NUMBER( keyUpdates );
 
+        b.appendNumber( "numYield" , curop.numYields() );
+        b.append( "lockStatMillis" , curop.lockStat().report() );
+        
         if ( ! exceptionInfo.empty() ) 
             exceptionInfo.append( b , "exception" , "exceptionCode" );
         

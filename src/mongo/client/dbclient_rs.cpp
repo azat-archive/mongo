@@ -88,11 +88,14 @@ namespace mongo {
         return seedStr;
     }
 
+    // Must already be in _setsLock when constructing a new ReplicaSetMonitor. This is why you
+    // should only create ReplicaSetMonitors from ReplicaSetMonitor::get and
+    // ReplicaSetMonitor::createIfNeeded.
     ReplicaSetMonitor::ReplicaSetMonitor( const string& name , const vector<HostAndPort>& servers )
         : _lock( "ReplicaSetMonitor instance" ),
           _checkConnectionLock( "ReplicaSetMonitor check connection lock" ),
           _name( name ), _master(-1),
-          _nextSlave(0), _localThresholdMillis(cmdLine.defaultLocalThresholdMillis) {
+          _nextSlave(0), _failedChecks(0), _localThresholdMillis(cmdLine.defaultLocalThresholdMillis) {
 
         uassert( 13642 , "need at least 1 node for a replica set" , servers.size() > 0 );
 
@@ -128,34 +131,60 @@ namespace mongo {
         // Check everything to get the first data
         _check( true );
 
+        _setServers.insert( pair<string, vector<HostAndPort> >(name, servers) );
+
         log() << "replica set monitor for replica set " << _name << " started, address is " << getServerAddress() << endl;
 
     }
 
+    // Must already be in _setsLock when destroying a ReplicaSetMonitor. This is why you should only
+    // delete ReplicaSetMonitors from ReplicaSetMonitor::remove.
     ReplicaSetMonitor::~ReplicaSetMonitor() {
+        scoped_lock lk ( _lock );
+        log() << "deleting replica set monitor for: " << _getServerAddress_inlock() << endl;
+        _cacheServerAddresses_inlock();
+        pool.removeHost( _getServerAddress_inlock() );
         _nodes.clear();
         _master = -1;
     }
 
-    ReplicaSetMonitorPtr ReplicaSetMonitor::get( const string& name , const vector<HostAndPort>& servers ) {
+    void ReplicaSetMonitor::_cacheServerAddresses_inlock() {
+        // Save list of current set members so that the monitor can be rebuilt if needed.
+        vector<HostAndPort>& servers = _setServers[_name];
+        servers.clear();
+        for ( vector<Node>::iterator it = _nodes.begin(); it < _nodes.end(); ++it ) {
+            servers.push_back( it->addr );
+        }
+    }
+
+    void ReplicaSetMonitor::createIfNeeded( const string& name , const vector<HostAndPort>& servers ) {
         scoped_lock lk( _setsLock );
         ReplicaSetMonitorPtr& m = _sets[name];
         if ( ! m )
             m.reset( new ReplicaSetMonitor( name , servers ) );
 
         replicaSetMonitorWatcher.safeGo();
-
-        return m;
     }
 
-    ReplicaSetMonitorPtr ReplicaSetMonitor::get( const string& name ) {
+    ReplicaSetMonitorPtr ReplicaSetMonitor::get( const string& name , const bool createFromSeed ) {
         scoped_lock lk( _setsLock );
         map<string,ReplicaSetMonitorPtr>::const_iterator i = _sets.find( name );
-        if ( i == _sets.end() ) 
-            return ReplicaSetMonitorPtr();
-        return i->second;
+        if ( i != _sets.end() ) {
+            return i->second;
+        }
+        if ( createFromSeed ) {
+            map<string,vector<HostAndPort> >::const_iterator j = _setServers.find( name );
+            if ( j != _setServers.end() ) {
+                log(4) << "Creating ReplicaSetMonitor from cached address" << endl;
+                ReplicaSetMonitorPtr& m = _sets[name];
+                verify( !m );
+                m.reset( new ReplicaSetMonitor( name, j->second ) );
+                replicaSetMonitorWatcher.safeGo();
+                return m;
+            }
+        }
+        return ReplicaSetMonitorPtr();
     }
-
 
     void ReplicaSetMonitor::checkAll( bool checkAllSecondaries ) {
         set<string> seen;
@@ -179,14 +208,30 @@ namespace mongo {
                 break;
 
             m->check( checkAllSecondaries );
+            {
+                scoped_lock lk( _setsLock );
+                if ( m->_failedChecks >= _maxFailedChecks ) {
+                    log() << "Replica set " << m->getName() << " was down for " << m->_failedChecks
+                          << " checks in a row. Stopping polled monitoring of the set." << endl;
+                    _remove_inlock( m->getName() );
+                }
+            }
         }
 
 
     }
 
-    void ReplicaSetMonitor::remove( const string& name ) {
+    void ReplicaSetMonitor::remove( const string& name, bool clearSeedCache ) {
         scoped_lock lk( _setsLock );
+        _remove_inlock( name, clearSeedCache );
+    }
+
+    void ReplicaSetMonitor::_remove_inlock( const string& name, bool clearSeedCache ) {
+        log(2) << "Removing ReplicaSetMonitor for " << name << " from replica set table" << endl;
         _sets.erase( name );
+        if ( clearSeedCache ) {
+            _setServers.erase( name );
+        }
     }
 
     void ReplicaSetMonitor::setConfigChangeHook( ConfigChangeHook hook ) {
@@ -304,7 +349,7 @@ namespace mongo {
                     fallbackNode = _nodes[ _nextSlave ].addr;
                     if ( ! preferLocal )
                         return fallbackNode;
-                    else if ( _nodes[ _nextSlave ].isLocalSecondary_inlock( _localThresholdMillis ) ) {
+                    else if ( _nodes[ _nextSlave ].isLocalSecondary( _localThresholdMillis ) ) {
                         // found a local slave.  return early.
                         log(2) << "dbclient_rs getSlave found local secondary for queries: "
                                << _nextSlave << ", ping time: "
@@ -349,10 +394,10 @@ namespace mongo {
         BSONObj status;
 
         /* replSetGetStatus requires admin auth so use a connection from the pool,
-         * which are authenticated with the keyFile credentials.
+         * and tell it to use the internal credentials.
          */
         scoped_ptr<ScopedDbConnection> authenticatedConn(
-                ScopedDbConnection::getScopedDbConnection( hostAddr ) );
+                ScopedDbConnection::getInternalScopedDbConnection( hostAddr ) );
 
         if ( !authenticatedConn->get()->runCommand( "admin",
                                                     BSON( "replSetGetStatus" << 1 ),
@@ -617,7 +662,7 @@ namespace mongo {
 
         int newMaster = -1;
         shared_ptr<DBClientConnection> nodeConn;
-        
+
         for ( int retry = 0; retry < 2; retry++ ) {
             bool triedQuickCheck = false;
 
@@ -716,6 +761,18 @@ namespace mongo {
             warning() << "No primary detected for set " << _name << endl;
             scoped_lock lk( _lock );
             _master = -1;
+
+            if (checkAllSecondaries) {
+                for ( unsigned i = 0; i < _nodes.size(); i++ ) {
+                    if ( _nodes[i].ok ) {
+                        _failedChecks = 0;
+                        return;
+                    }
+                }
+                // None of the nodes are ok.
+                _failedChecks++;
+                log() << "All nodes for set " << _name << " are down. This has happened for " << _failedChecks << " checks in a row. Polling will stop after " << _maxFailedChecks - _failedChecks << " more failed checks" << endl;
+            }
         }
     }
 
@@ -789,6 +846,107 @@ namespace mongo {
             conn->getServerAddress() == _nodes[nodeOffset].conn->getServerAddress() );
     }
 
+    HostAndPort ReplicaSetMonitor::selectNode( const vector<Node>& nodes,
+            const BSONObj& readPreferenceTag,
+            bool secOnly,
+            int localThresholdMillis,
+            int& nextNodeIndex /* in/out */ ) {
+
+        HostAndPort fallbackNode;
+
+        for ( size_t itNode = 0; itNode < nodes.size(); ++itNode ) {
+            nextNodeIndex = ( nextNodeIndex + 1 ) % nodes.size();
+            const Node& node = nodes[nextNodeIndex];
+
+            if ( !node.ok ){
+                log(2) << "dbclient_rs not selecting " << node
+                       << ", not currently ok" << endl;
+                continue;
+            }
+
+            if ( secOnly && !node.okForSecondaryQueries() ) {
+                continue;
+            }
+
+            if ( node.matchesTag( readPreferenceTag )) {
+                // found an ok candidate; may not be local.
+                fallbackNode = node.addr;
+
+                if ( node.isLocalSecondary( localThresholdMillis )){
+                    // found a local node.  return early.
+                    log(2) << "dbclient_rs getSlave found local secondary for queries: "
+                            << nextNodeIndex << ", ping time: "
+                            << node.pingTimeMillis << endl;
+                    return fallbackNode;
+                }
+            }
+        }
+
+        return fallbackNode;
+    }
+
+    HostAndPort ReplicaSetMonitor::selectNode( const std::vector<Node>& nodes,
+            ReadPreference readPreference,
+            const BSONObj& readPreferenceTag,
+            int localThresholdMillis,
+            int primaryNodeIndex,
+            int& nextNodeIndex /* in/out */ ) {
+
+        switch ( readPreference ) {
+        case ReadPreference_PrimaryOnly:
+            return checkPrimary( nodes, primaryNodeIndex );
+
+        case ReadPreference_PrimaryPreferred:
+        {
+            HostAndPort candidatePri = checkPrimary( nodes, primaryNodeIndex );
+
+            if ( !candidatePri.empty() ){
+                return candidatePri;
+            }
+
+            return selectNode( nodes, readPreferenceTag, true, localThresholdMillis,
+                    nextNodeIndex );
+        }
+
+        case ReadPreference_SecondaryOnly:
+            return selectNode( nodes, readPreferenceTag, true, localThresholdMillis,
+                    nextNodeIndex );
+
+        case ReadPreference_SecondaryPreferred:
+        {
+            HostAndPort candidateSec = selectNode( nodes, readPreferenceTag, true,
+                    localThresholdMillis, nextNodeIndex );
+
+            if ( !candidateSec.empty() ){
+                return candidateSec;
+            }
+
+            return checkPrimary( nodes, primaryNodeIndex );
+        }
+
+        case ReadPreference_Nearest:
+            return selectNode( nodes, readPreferenceTag, false, localThresholdMillis,
+                    nextNodeIndex );
+
+        default:
+            uassert( 16337, "Unknown read preference", false );
+            break;
+        }
+
+        return HostAndPort();
+    }
+
+    HostAndPort ReplicaSetMonitor::checkPrimary(
+            const vector<Node>& nodes,
+            int primaryNodeIndex ){
+
+        if ( primaryNodeIndex >= 0 && nodes[primaryNodeIndex].ok ){
+            return nodes[primaryNodeIndex].addr;
+        }
+
+        return HostAndPort();
+    }
+
     bool ReplicaSetMonitor::Node::matchesTag( const BSONObj& tag ) const {
         if ( tag.isEmpty() ){
            return true;
@@ -832,36 +990,57 @@ namespace mongo {
 
     mongo::mutex ReplicaSetMonitor::_setsLock( "ReplicaSetMonitor" );
     map<string,ReplicaSetMonitorPtr> ReplicaSetMonitor::_sets;
+    map<string,vector<HostAndPort> > ReplicaSetMonitor::_setServers;
     ReplicaSetMonitor::ConfigChangeHook ReplicaSetMonitor::_hook;
+    int ReplicaSetMonitor::_maxFailedChecks = 30; // At 1 check every 10 seconds, 30 checks takes 5 minutes
 
     // --------------------------------
     // ----- DBClientReplicaSet ---------
     // --------------------------------
 
     DBClientReplicaSet::DBClientReplicaSet( const string& name , const vector<HostAndPort>& servers, double so_timeout )
-        : _monitor( ReplicaSetMonitor::get( name , servers ) ),
-          _so_timeout( so_timeout ) {
+        : _setName( name ), _so_timeout( so_timeout ) {
+        ReplicaSetMonitor::createIfNeeded( name, servers );
     }
 
     DBClientReplicaSet::~DBClientReplicaSet() {
     }
 
+    ReplicaSetMonitorPtr DBClientReplicaSet::_getMonitor() const {
+        ReplicaSetMonitorPtr rsm = ReplicaSetMonitor::get( _setName, true );
+        // If you can't get a ReplicaSetMonitor then this connection isn't valid
+        uassert( 16340, str::stream() << "No replica set monitor active and no cached seed "
+                 "found for set: " << _setName, rsm );
+        return rsm;
+    }
+
+    // This can't throw an exception because it is called in the destructor of ScopedDbConnection
+    string DBClientReplicaSet::getServerAddress() const {
+        ReplicaSetMonitorPtr rsm = ReplicaSetMonitor::get( _setName, true );
+        if ( !rsm ) {
+            warning() << "Trying to get server address for DBClientReplicaSet, but no "
+                "ReplicaSetMonitor exists for " << _setName << endl;
+            return str::stream() << _setName << "/" ;
+        }
+        return rsm->getServerAddress();
+    }
+
     DBClientConnection * DBClientReplicaSet::checkMaster() {
-        HostAndPort h = _monitor->getMaster();
+        ReplicaSetMonitorPtr monitor = _getMonitor();
+        HostAndPort h = monitor->getMaster();
 
         if ( h == _masterHost && _master ) {
             // a master is selected.  let's just make sure connection didn't die
             if ( ! _master->isFailed() )
                 return _master.get();
-
-            _monitor->notifyFailure( _masterHost );
+            monitor->notifyFailure( _masterHost );
         }
 
-        _masterHost = _monitor->getMaster();
+        _masterHost = monitor->getMaster();
         _master.reset( new DBClientConnection( true , this , _so_timeout ) );
         string errmsg;
         if ( ! _master->connect( _masterHost , errmsg ) ) {
-            _monitor->notifyFailure( _masterHost );
+            monitor->notifyFailure( _masterHost );
             uasserted( 13639 , str::stream() << "can't connect to new replica set master [" << _masterHost.toString() << "] err: " << errmsg );
         }
         _auth( _master.get() );
@@ -869,14 +1048,15 @@ namespace mongo {
     }
 
     DBClientConnection * DBClientReplicaSet::checkSlave() {
-        HostAndPort h = _monitor->getSlave( _slaveHost );
+        ReplicaSetMonitorPtr monitor = _getMonitor();
+        HostAndPort h = monitor->getSlave( _slaveHost );
 
         if ( h == _slaveHost && _slave ) {
             if ( ! _slave->isFailed() )
                 // TODO: SERVER-5082, slave auth credentials may have changed
                 return _slave.get();
-            _monitor->notifySlaveFailure( _slaveHost );
-            _slaveHost = _monitor->getSlave();
+            monitor->notifySlaveFailure( _slaveHost );
+            _slaveHost = monitor->getSlave();
         } 
         else {
             _slaveHost = h;
@@ -894,7 +1074,7 @@ namespace mongo {
             const AuthInfo& a = *i;
             string errmsg;
             if ( ! conn->auth( a.dbname , a.username , a.pwd , errmsg, a.digestPassword ) )
-                warning() << "cached auth failed for set: " << _monitor->getName() << " db: " << a.dbname << " user: " << a.username << endl;
+                warning() << "cached auth failed for set: " << _setName << " db: " << a.dbname << " user: " << a.username << endl;
 
         }
     }
@@ -912,8 +1092,11 @@ namespace mongo {
             checkMaster();
         }
         catch (AssertionException&) {
-            if (_master && _monitor) {
-                _monitor->notifyFailure(_masterHost);
+            // Can't use _getMonitor because that will create a new monitor from the cached seed if
+            // the monitor doesn't exist.
+            ReplicaSetMonitorPtr monitor = ReplicaSetMonitor::get(_setName);
+            if (_master && monitor ) {
+                monitor->notifyFailure(_masterHost);
             }
             return false;
         }
@@ -942,12 +1125,12 @@ namespace mongo {
         checkMaster()->insert(ns, v, flags);
     }
 
-    void DBClientReplicaSet::remove( const string &ns , Query obj , bool justOne ) {
-        checkMaster()->remove(ns, obj, justOne);
+    void DBClientReplicaSet::remove( const string &ns , Query obj , int flags ) {
+        checkMaster()->remove(ns, obj, flags);
     }
 
-    void DBClientReplicaSet::update( const string &ns , Query query , BSONObj obj , bool upsert , bool multi ) {
-        return checkMaster()->update(ns, query, obj, upsert,multi);
+    void DBClientReplicaSet::update( const string &ns , Query query , BSONObj obj , int flags ) {
+        return checkMaster()->update( ns, query, obj, flags );
     }
 
     auto_ptr<DBClientCursor> DBClientReplicaSet::query(const string &ns, Query query, int nToReturn, int nToSkip,
@@ -998,7 +1181,12 @@ namespace mongo {
 
     void DBClientReplicaSet::isntMaster() { 
         log() << "got not master for: " << _masterHost << endl;
-        _monitor->notifyFailure( _masterHost );
+        // Can't use _getMonitor because that will create a new monitor from the cached seed if
+        // the monitor doesn't exist.
+        ReplicaSetMonitorPtr monitor = ReplicaSetMonitor::get( _setName );
+        if ( monitor ) {
+            monitor->notifyFailure( _masterHost );
+        }
         _master.reset(); 
     }
 
@@ -1024,7 +1212,7 @@ namespace mongo {
     void DBClientReplicaSet::isntSecondary() {
         log() << "slave no longer has secondary status: " << _slaveHost << endl;
         // Failover to next slave
-        _monitor->notifySlaveFailure( _slaveHost );
+        _getMonitor()->notifySlaveFailure( _slaveHost );
         _slave.reset();
     }
 

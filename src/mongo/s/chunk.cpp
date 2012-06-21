@@ -110,9 +110,6 @@ namespace mongo {
     }
 
     BSONObj Chunk::_getExtremeKey( int sort ) const {
-        // We need to use a sharded connection here b/c there could be data left from stale migrations outside
-        // our chunk ranges.
-        ShardConnection conn( getShard().getConnString() , _manager->getns() );
         Query q;
         if ( sort == 1 ) {
             q.sort( _manager->getShardKey().key() );
@@ -133,30 +130,20 @@ namespace mongo {
 
             q.sort( r.obj() );
         }
-
         // find the extreme key
-        BSONObj end;
-        try {
-            end = conn->findOne( _manager->getns() , q );
-            conn.done();
-        }
-        catch( StaleConfigException& ){
-            // We need to handle stale config exceptions if using sharded connections
-            // caught and reported above
-            conn.done();
-            throw;
-        }
-
+        scoped_ptr<ScopedDbConnection> conn(
+                ScopedDbConnection::getInternalScopedDbConnection(getShard().getConnString()));
+        BSONObj end = conn->get()->findOne(_manager->getns(), q);
+        conn->done();
         if ( end.isEmpty() )
             return BSONObj();
-
         return _manager->getShardKey().extractKey( end );
     }
 
     void Chunk::pickMedianKey( BSONObj& medianKey ) const {
         // Ask the mongod holding this chunk to figure out the split points.
         scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getScopedDbConnection( getShard().getConnString() ) );
+                ScopedDbConnection::getInternalScopedDbConnection( getShard().getConnString() ) );
         BSONObj result;
         BSONObjBuilder cmd;
         cmd.append( "splitVector" , _manager->getns() );
@@ -184,7 +171,7 @@ namespace mongo {
     void Chunk::pickSplitVector( vector<BSONObj>& splitPoints , int chunkSize /* bytes */, int maxPoints, int maxObjs ) const {
         // Ask the mongod holding this chunk to figure out the split points.
         scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getScopedDbConnection( getShard().getConnString() ) );
+                ScopedDbConnection::getInternalScopedDbConnection( getShard().getConnString() ) );
         BSONObj result;
         BSONObjBuilder cmd;
         cmd.append( "splitVector" , _manager->getns() );
@@ -281,7 +268,7 @@ namespace mongo {
         uassert( 13003 , "can't split a chunk with only one distinct value" , _min.woCompare(_max) );
 
         scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getScopedDbConnection( getShard().getConnString() ) );
+                ScopedDbConnection::getInternalScopedDbConnection( getShard().getConnString() ) );
 
         BSONObjBuilder cmd;
         cmd.append( "splitChunk" , _manager->getns() );
@@ -320,7 +307,7 @@ namespace mongo {
         Shard from = _shard;
 
         scoped_ptr<ScopedDbConnection> fromconn(
-                ScopedDbConnection::getScopedDbConnection( from.getConnString() ) );
+                ScopedDbConnection::getInternalScopedDbConnection( from.getConnString() ) );
 
         bool worked = fromconn->get()->runCommand( "admin" ,
                                                    BSON( "moveChunk" << _manager->getns() <<
@@ -442,6 +429,11 @@ namespace mongo {
 
         }
         catch ( DBException& e ) {
+
+            // TODO: Make this better - there are lots of reasons a split could fail
+            // Random so that we don't sync up with other failed splits
+            _dataWritten = mkDataWritten();
+
             // if the collection lock is taken (e.g. we're migrating), it is fine for the split to fail.
             warning() << "could not autosplit collection " << _manager->getns() << causedBy( e ) << endl;
             return false;
@@ -450,7 +442,7 @@ namespace mongo {
 
     long Chunk::getPhysicalSize() const {
         scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getScopedDbConnection( getShard().getConnString() ) );
+                ScopedDbConnection::getInternalScopedDbConnection( getShard().getConnString() ) );
 
         BSONObj result;
         uassert( 10169 ,  "datasize failed!" , conn->get()->runCommand( "admin" ,
@@ -531,7 +523,7 @@ namespace mongo {
 
         try {
             scoped_ptr<ScopedDbConnection> conn(
-                    ScopedDbConnection::getScopedDbConnection( configServer.modelServer() ) );
+                    ScopedDbConnection::getInternalScopedDbConnection( configServer.modelServer() ) );
 
             conn->get()->update( chunkMetadataNS,
                                  BSON( "_id" << genID() ),
@@ -930,7 +922,8 @@ namespace mongo {
             {
                 // get stats to see if there is any data
                 scoped_ptr<ScopedDbConnection> shardConn(
-                        ScopedDbConnection::getScopedDbConnection( primary.getConnString() ) );
+                        ScopedDbConnection::getInternalScopedDbConnection( primary
+                                                                           .getConnString() ) );
 
                 numObjects = shardConn->get()->count( getns() );
                 shardConn->done();
@@ -988,7 +981,8 @@ namespace mongo {
         log() << "going to create " << splitPoints.size() + 1 << " chunk(s) for: " << _ns
               << " using new epoch " << version.epoch() << endl;
         
-        scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getScopedDbConnection( config ) );
+        scoped_ptr<ScopedDbConnection> conn(
+                ScopedDbConnection::getInternalScopedDbConnection( config ) );
 
         // Make sure we don't have any chunks that already exist here
         unsigned long long existingChunks =
@@ -1002,17 +996,6 @@ namespace mongo {
             BSONObj max = i < splitPoints.size() ? splitPoints[i] : _key.globalMax();
 
             Chunk temp( this , min , max , shards[ i % shards.size() ], version );
-        
-            if( i < shards.size() ){
-                // the ensure index will have the (desired) indirect effect of creating the collection on the
-                // assigned shard, as it sets up the index over the sharding keys.
-                scoped_ptr<ScopedDbConnection> shardConn(
-                        ScopedDbConnection::getScopedDbConnection( temp.getShard()
-                                                                   .getConnString() ) );
-                // do not cache ensureIndex SERVER-1691
-                shardConn->get()->ensureIndex( getns(), getShardKey().key(), _unique, "", false );
-                shardConn->done();
-            }
 
             BSONObjBuilder chunkBuilder;
             temp.serialize( chunkBuilder );
@@ -1221,26 +1204,42 @@ namespace mongo {
 
         LOG(1) << "ChunkManager::drop : " << _ns << "\t all locked" << endl;
 
+        map<string,BSONObj> errors;
         // delete data from mongod
         for ( set<Shard>::iterator i=seen.begin(); i!=seen.end(); i++ ) {
             scoped_ptr<ScopedDbConnection> conn(
                     ScopedDbConnection::getScopedDbConnection( i->getConnString() ));
-            conn->get()->dropCollection( _ns );
+            BSONObj info;
+            if ( !conn->get()->dropCollection( _ns, &info ) ) {
+                errors[ i->getConnString() ] = info;
+            }
             conn->done();
+        }
+        if ( !errors.empty() ) {
+            stringstream ss;
+            ss << "Dropping collection failed on the following hosts: ";
+            for ( map<string,BSONObj>::const_iterator it = errors.begin(); it != errors.end(); ) {
+                ss << it->first << ": " << it->second;
+                ++it;
+                if ( it != errors.end() ) {
+                    ss << ", ";
+                }
+            }
+            uasserted( 16338, ss.str() );
         }
 
         LOG(1) << "ChunkManager::drop : " << _ns << "\t removed shard data" << endl;
 
         // remove chunk data
         scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getScopedDbConnection( configServer.modelServer() ) );
+                ScopedDbConnection::getInternalScopedDbConnection( configServer.modelServer() ) );
         conn->get()->remove( Chunk::chunkMetadataNS , BSON( "ns" << _ns ) );
         conn->done();
         LOG(1) << "ChunkManager::drop : " << _ns << "\t removed chunk data" << endl;
 
         for ( set<Shard>::iterator i=seen.begin(); i!=seen.end(); i++ ) {
             scoped_ptr<ScopedDbConnection> conn(
-                    ScopedDbConnection::getScopedDbConnection( i->getConnString() ) );
+                    ScopedDbConnection::getInternalScopedDbConnection( i->getConnString() ) );
             BSONObj res;
 
             // this is horrible
@@ -1427,7 +1426,11 @@ namespace mongo {
 
         LOG(1) << "    setShardVersion  " << s.getName() << " " << conn.getServerAddress() << "  " << ns << "  " << cmd << " " << &conn << endl;
 
-        return conn.runCommand( "admin" , cmd , result );
+        return conn.runCommand( "admin",
+                                cmd,
+                                result,
+                                0,
+                                &AuthenticationTable::getInternalSecurityAuthenticationTable() );
     }
 
 } // namespace mongo

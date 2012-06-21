@@ -295,11 +295,23 @@ namespace mongo {
                     return passthrough( conf , cmdObj , result );
                 }
 
-                ChunkManagerPtr cm = conf->getChunkManager( fullns );
-                massert( 10418 ,  "how could chunk manager be null!" , cm );
+                //
+                // TODO: There will be problems if we simultaneously shard and drop a collection
+                //
+
+                ChunkManagerPtr cm;
+                ShardPtr primary;
+                conf->getChunkManagerOrPrimary( fullns, cm, primary );
+
+                if( ! cm ) return passthrough( conf , cmdObj , result );
 
                 cm->drop( cm );
-                uassert( 13512 , "drop collection attempted on non-sharded collection" , conf->removeSharding( fullns ) );
+
+                if( ! conf->removeSharding( fullns ) ){
+                    warning() << "collection " << fullns
+                              << " was reloaded as unsharded before drop completed"
+                              << " during single drop" << endl;
+                }
 
                 return 1;
             }
@@ -322,7 +334,7 @@ namespace mongo {
                     return 0;
                 }
 
-                DBConfigPtr conf = grid.getDBConfig( dbName , false );
+                DBConfigPtr conf = grid.getDBConfig( dbName, false );
 
                 log() << "DROP DATABASE: " << dbName << endl;
 
@@ -331,7 +343,42 @@ namespace mongo {
                     return true;
                 }
 
-                if ( ! conf->dropDatabase( errmsg ) )
+                // Make sure you have write auth to the database, otherwise you'll delete the
+                // database info from the config server before the command even reaches the shards.
+                if ( !ClientBasic::getCurrent()->getAuthenticationInfo()->isAuthorized( dbName ) ) {
+                    result.append( "errmsg",
+                                   str::stream() << "Not authorized to drop db: " << dbName );
+                    return false;
+                }
+
+                //
+                // Reload the database configuration so that we're sure a database entry exists
+                // TODO: This won't work with parallel dropping
+                //
+
+                grid.removeDBIfExists( *conf );
+                grid.getDBConfig( dbName );
+
+                // TODO: Make dropping logic saner and more tolerant of partial drops.  This is
+                // particularly important since a database drop can be aborted by *any* collection
+                // with a distributed namespace lock taken (migrates/splits)
+
+                //
+                // Create a copy of the DB config object to drop, so that no one sees a weird
+                // intermediate version of the info
+                //
+
+                DBConfig confCopy( conf->getName() );
+                if( ! confCopy.load() ){
+                    errmsg = "could not load database info to drop";
+                    return false;
+                }
+
+                // Enable sharding so we can correctly retry failed drops
+                // This will re-drop old sharded entries if they exist
+                confCopy.enableSharding( false );
+
+                if ( ! confCopy.dropDatabase( errmsg ) )
                     return false;
 
                 result.append( "dropped" , dbName );
@@ -1165,6 +1212,7 @@ namespace mongo {
                 set<ServerAndQuery> servers;
                 map<Shard,BSONObj> results;
 
+                BSONObjBuilder shardResultsB;
                 BSONObjBuilder shardCountsB;
                 BSONObjBuilder aggCountsB;
                 map<string,long long> countsMap;
@@ -1218,6 +1266,7 @@ namespace mongo {
                         ok = singleResult["ok"].trueValue();
                         if ( !ok ) continue;
 
+                        shardResultsB.append( server , singleResult );
                         BSONObj counts = singleResult["counts"].embeddedObjectUserCheck();
                         shardCountsB.append( server , counts );
 
@@ -1249,8 +1298,10 @@ namespace mongo {
                 // build the sharded finish command
                 BSONObjBuilder finalCmd;
                 finalCmd.append( "mapreduce.shardedfinish" , cmdObj );
-                finalCmd.append( "inputNS" , dbName + "." + shardResultCollection );
+                finalCmd.append( "inputDB" , dbName );
+                finalCmd.append( "shardedOutputCollection" , shardResultCollection );
 
+                finalCmd.append( "shards" , shardResultsB.done() );
                 BSONObj shardCounts = shardCountsB.done();
                 finalCmd.append( "shardCounts" , shardCounts );
                 timingBuilder.append( "shardProcessing" , t.millis() );

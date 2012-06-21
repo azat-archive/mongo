@@ -93,7 +93,7 @@ namespace mongo {
              * @param  threshold  max ping time (in ms) to be considered local
              * @return true if node is a local secondary, and can handle queries
              **/
-            bool isLocalSecondary_inlock( const int threshold ) const {
+            bool isLocalSecondary( const int threshold ) const {
                 return pingTimeMillis < threshold;
             }
 
@@ -119,17 +119,43 @@ namespace mongo {
             bool hidden;
 
             int pingTimeMillis;
+
         };
 
         /**
-         * gets a cached Monitor per name or will create if doesn't exist
+         * Selects the right node given the nodes to pick from and the preference.
+         *
+         * @param nodes the nodes to select from
+         * @param readPreference the read mode to use
+         * @param readPreferenceTag the tags used for filtering nodes
+         * @param localThresholdMillis the exclusive upper bound of ping time to be
+         *     considered as a local node. Local nodes are favored over non-local
+         *     nodes if multiple nodes matches the other criteria.
+         * @param primaryNodeIndex the index of the primary node
+         * @param nextNodeIndex the index of the next node to begin from checking.
+         *     Can advance to a different index (mainly used for doing round-robin).
+         *
+         * @return the host object of the node selected. If none of the nodes are
+         *     eligible, returns an empty host.
          */
-        static ReplicaSetMonitorPtr get( const string& name , const vector<HostAndPort>& servers );
+        static HostAndPort selectNode( const std::vector<Node>& nodes,
+                ReadPreference readPreference,
+                const BSONObj& readPreferenceTag,
+                int localThresholdMillis,
+                int primaryNodeIndex,
+                int& nextNodeIndex );
 
         /**
-         * gets a cached Monitor per name or will return none if it doesn't exist
+         * Creates a new ReplicaSetMonitor, if it doesn't already exist.
          */
-        static ReplicaSetMonitorPtr get( const string& name );
+        static void createIfNeeded( const string& name , const vector<HostAndPort>& servers );
+
+        /**
+         * gets a cached Monitor per name. If the monitor is not found and createFromSeed is false,
+         * it will return none. If createFromSeed is true, it will try to look up the last known
+         * servers list for this set and will create a new monitor using that as the seed list.
+         */
+        static ReplicaSetMonitorPtr get( const string& name, const bool createFromSeed = false );
 
 
         /**
@@ -139,9 +165,14 @@ namespace mongo {
         static void checkAll( bool checkAllSecondaries );
 
         /**
-         * deletes the ReplicaSetMonitor for the given set name.
+         * Removes the ReplicaSetMonitor for the given set name from _sets, which will delete it.
+         * If clearSeedCache is true, then the cached seed string for this Replica Set will be removed
+         * from _setServers.
          */
-        static void remove( const string& name );
+        static void remove( const string& name, bool clearSeedCache = false );
+
+        static int getMaxFailedChecks() { return _maxFailedChecks; };
+        static void setMaxFailedChecks(int numChecks) { _maxFailedChecks = numChecks; };
 
         /**
          * this is called whenever the config of any replica set changes
@@ -198,11 +229,13 @@ namespace mongo {
     private:
         /**
          * This populates a list of hosts from the list of seeds (discarding the
-         * seed list).
+         * seed list). Should only be called from within _setsLock.
          * @param name set name
          * @param servers seeds
          */
         ReplicaSetMonitor( const string& name , const vector<HostAndPort>& servers );
+
+        static void _remove_inlock( const string& name, bool clearSeedCache = false );
 
         /**
          * Checks all connections from the host list and sets the current
@@ -243,6 +276,13 @@ namespace mongo {
         bool _checkConnection( DBClientConnection* conn, string& maybePrimary,
                 bool verbose, int nodesOffset );
 
+        /**
+         * Save the seed list for the current set into the _setServers map
+         * Should only be called if you're already holding _setsLock and this
+         * monitor's _lock.
+         */
+        void _cacheServerAddresses_inlock();
+
         string _getServerAddress_inlock() const;
 
         NodeDiff _getHostDiff_inlock( const BSONObj& hostList );
@@ -261,6 +301,34 @@ namespace mongo {
          * a mutex.
          */
         bool _checkConnMatch_inlock( DBClientConnection* conn, size_t nodeOffset ) const;
+
+        /**
+         * Selects the right node given the nodes to pick from and the preference.
+         *
+         * @param nodes the nodes to select from
+         * @param readPreferenceTag the tags to use for choosing the right node
+         * @param secOnly never select a primary if true
+         * @param localThresholdMillis the exclusive upper bound of ping time to be
+         *     considered as a local node. Local nodes are favored over non-local
+         *     nodes if multiple nodes matches the other criteria.
+         * @param nextNodeIndex the index of the next node to begin from checking.
+         *     Can advance to a different index (mainly used for doing round-robin).
+         *
+         * @return the host object of the node selected. If none of the nodes are
+         *     eligible, returns an empty host.
+         */
+        static HostAndPort selectNode( const std::vector<Node>& nodes,
+                const BSONObj& readPreferenceTag,
+                bool secOnly,
+                int localThresholdMillis,
+                int& nextNodeIndex );
+
+        /**
+         * @return the primary if it is ok to use, otherwise returns an empty
+         *     HostAndPort object.
+         */
+        static HostAndPort checkPrimary( const std::vector<Node>& nodes,
+                int primaryNodeIndex );
 
         // protects _localThresholdMillis, _nodes and refs to _nodes (eg. _master & _nextSlave)
         mutable mongo::mutex _lock;
@@ -284,11 +352,17 @@ namespace mongo {
 
         int _master; // which node is the current master.  -1 means no master is known
         int _nextSlave; // which node is the current slave
+        // The number of consecutive times the set has been checked and every member in the set was down.
+        int _failedChecks;
 
-        static mongo::mutex _setsLock; // protects _sets
+        static mongo::mutex _setsLock; // protects _sets and _setServers
         static map<string,ReplicaSetMonitorPtr> _sets; // set name to Monitor
+        static map<string,vector<HostAndPort> > _setServers; // set name to seed list. Used to rebuild the monitor if it is cleaned up but then the set is accessed again.
+
         static ConfigChangeHook _hook;
         int _localThresholdMillis; // local ping latency threshold (protected by _lock)
+
+        static int _maxFailedChecks;
     };
 
     /** Use this class to connect to a replica set of servers.  The class will manage
@@ -302,6 +376,8 @@ namespace mongo {
     class DBClientReplicaSet : public DBClientBase {
     public:
         using DBClientBase::query;
+        using DBClientBase::update;
+        using DBClientBase::remove;
 
         /** Call connect() after constructing. autoReconnect is always on for DBClientReplicaSet connections. */
         DBClientReplicaSet( const string& name , const vector<HostAndPort>& servers, double so_timeout=0 );
@@ -333,9 +409,9 @@ namespace mongo {
             is only nominally faster and not worth a special effort to try to use.  */
         virtual void insert( const string &ns, const vector< BSONObj >& v , int flags=0);
 
-        virtual void remove( const string &ns , Query obj , bool justOne = 0 );
+        virtual void remove( const string &ns , Query obj , int flags );
 
-        virtual void update( const string &ns , Query query , BSONObj obj , bool upsert = 0 , bool multi = 0 );
+        virtual void update( const string &ns , Query query , BSONObj obj , int flags );
 
         virtual void killCursor( long long cursorID );
 
@@ -368,7 +444,7 @@ namespace mongo {
 
         string toString() { return getServerAddress(); }
 
-        string getServerAddress() const { return _monitor->getServerAddress(); }
+        string getServerAddress() const;
 
         virtual ConnectionString::ConnectionType type() const { return ConnectionString::SET; }
         virtual bool lazySupported() const { return true; }
@@ -392,7 +468,10 @@ namespace mongo {
 
         void _auth( DBClientConnection * conn );
 
-        ReplicaSetMonitorPtr _monitor;
+        // Throws a DBException if the monitor doesn't exist and there isn't a cached seed to use.
+        ReplicaSetMonitorPtr _getMonitor() const;
+
+        string _setName;
 
         HostAndPort _masterHost;
         scoped_ptr<DBClientConnection> _master;

@@ -1268,8 +1268,8 @@ namespace QueryTests {
             DbMessage dbMessage( message );
             QueryMessage queryMessage( dbMessage );
             Message result;
-            const char *exhaust = runQuery( message, queryMessage, *cc().curop(), result );
-            ASSERT( exhaust );
+            string exhaust = runQuery( message, queryMessage, *cc().curop(), result );
+            ASSERT( exhaust.size() );
             ASSERT_EQUALS( string( ns() ), exhaust );
         }
     };
@@ -1515,7 +1515,7 @@ namespace QueryTests {
         class Unlimited : public Base {
         public:
             void run() {
-                FieldRangeSet frs( "n/a", BSONObj(), true );
+                FieldRangeSet frs( "n/a", BSONObj(), true, true );
                 Testable t( 0, 0, BSON( "a" << 1 ), frs );
                 ASSERT_EQUALS( 0U, t.approxSize() );
                 BSONObj o = BSON( "a" << 1 );
@@ -1538,7 +1538,7 @@ namespace QueryTests {
             }
         private:
             void runWithDiskLoc( const DiskLoc *loc ) {
-                FieldRangeSet frs( "n/a", BSONObj(), true );
+                FieldRangeSet frs( "n/a", BSONObj(), true, true );
                 Testable t( 0, 1, BSON( "a" << 1 ), frs );
                 ASSERT_EQUALS( 0U, t.approxSize() );
                 t.add( BSON( "a" << 3 ), loc );

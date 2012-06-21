@@ -20,9 +20,10 @@
 
 #pragma once
 
-#include "../../util/net/hostandport.h"
-#include "../../util/concurrency/race.h"
-#include "health.h"
+#include "mongo/db/repl/health.h"
+#include "mongo/util/concurrency/list.h"
+#include "mongo/util/concurrency/race.h"
+#include "mongo/util/net/hostandport.h"
 
 namespace mongo {
     class Member;
@@ -103,7 +104,7 @@ namespace mongo {
 
                 return _id==r._id && votes == r.votes && h == r.h && priority == r.priority &&
                        arbiterOnly == r.arbiterOnly && slaveDelay == r.slaveDelay && hidden == r.hidden &&
-                       buildIndexes == buildIndexes;
+                       buildIndexes == r.buildIndexes;
             }
             bool operator!=(const MemberCfg& r) const { return !(*this == r); }
         };

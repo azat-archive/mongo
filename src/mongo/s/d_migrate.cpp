@@ -841,10 +841,14 @@ namespace mongo {
 
             MoveTimingHelper timing( "from" , ns , min , max , 6 /* steps */ , errmsg );
 
+            // Make sure we're as up-to-date as possible with shard information
+            // This catches the case where we had to previously changed a shard's host by
+            // removing/adding a shard with the same name
+            Shard::reloadShardInfo();
 
-            // Also, so 2.2 mongod can interact with 2.0 mongos, mongod needs to handle either a conn string or a
-            // shard in the to/from fields.  The Shard constructor handles this, eventually we should break the
-            // compatibility.
+            // So 2.2 mongod can interact with 2.0 mongos, mongod needs to handle either a conn
+            // string or a shard in the to/from fields.  The Shard constructor handles this,
+            // eventually we should break the compatibility.
 
             Shard fromShard( from );
             Shard toShard( to );
@@ -883,8 +887,9 @@ namespace mongo {
             ShardChunkVersion maxVersion;
             string myOldShard;
             {
-                scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getScopedDbConnection(
-                        shardingState.getConfigServer() ) );
+                scoped_ptr<ScopedDbConnection> conn(
+                        ScopedDbConnection::getInternalScopedDbConnection(
+                                shardingState.getConfigServer() ) );
 
                 BSONObj x;
                 BSONObj currChunk;
@@ -943,7 +948,12 @@ namespace mongo {
 
                 // since this could be the first call that enable sharding we also make sure to have the chunk manager up to date
                 shardingState.gotShardName( myOldShard );
-                ShardChunkVersion shardVersion;
+
+                // Using the maxVersion we just found will enforce a check - if we use zero version,
+                // it's possible this shard will be *at* zero version from a previous migrate and
+                // no refresh will be done
+                // TODO: Make this less fragile
+                ShardChunkVersion shardVersion = maxVersion;
                 shardingState.trySetVersion( ns , shardVersion /* will return updated */ );
 
                 log() << "moveChunk request accepted at version " << shardVersion << migrateLog;
@@ -1225,8 +1235,9 @@ namespace mongo {
                 bool ok = false;
                 BSONObj cmdResult;
                 try {
-                    scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getScopedDbConnection(
-                            shardingState.getConfigServer() ) );
+                    scoped_ptr<ScopedDbConnection> conn(
+                            ScopedDbConnection::getInternalScopedDbConnection(
+                                    shardingState.getConfigServer() ) );
                     ok = conn->get()->runCommand( "config" , cmd , cmdResult );
                     conn->done();
                 }
@@ -1252,8 +1263,8 @@ namespace mongo {
 
                     try {
                         scoped_ptr<ScopedDbConnection> conn(
-                                ScopedDbConnection::getScopedDbConnection( shardingState
-                                                                           .getConfigServer() ) );
+                                ScopedDbConnection::getInternalScopedDbConnection(
+                                        shardingState.getConfigServer() ) );
 
                         // look for the chunk in this shard whose version got bumped
                         // we assume that if that mod made it to the config, the applyOps was successful

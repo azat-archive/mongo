@@ -360,6 +360,7 @@ ShardingTest = function( testName , numShards , verboseLevel , numMongos , other
                 print( "ShardingTest " + this._testName + " going to add shard : " + n )
                 x = admin.runCommand( { addshard : n } );
                 printjson( x )
+                assert( x.ok );
                 shardNames.push( x.shardAdded )
                 z.shardName = x.shardAdded
             }
@@ -651,6 +652,12 @@ printShardingStatus = function( configDB , verbose ){
                             else {
                                 output( "\t\t\ttoo many chunks to print, use verbose if you want to force print" );
                             }
+
+                            configDB.tags.find( { ns : coll._id } ).sort( { min : 1 } ).forEach( 
+                                function( tag ) {
+                                    output( "\t\t\t tag: " + tag.tag + "  " + tojson( tag.min ) + " -->> " + tojson( tag.max ) );
+                                }
+                            )
                         }
                     }
                 )

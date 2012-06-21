@@ -18,6 +18,8 @@
 
 #include "mongo/client/connpool.h"
 
+// This file contains the client-only implementation of the factory functions for getting
+// ScopedDbConnections.
 namespace mongo {
 
     ScopedDbConnection* ScopedDbConnection::getScopedDbConnection() {
@@ -29,10 +31,16 @@ namespace mongo {
         return new ScopedDbConnection(host, socketTimeout);
     }
 
-    ScopedDbConnection* ScopedDbConnection::getScopedDbConnection(const string& host,
-                                                                  DBClientBase* conn,
-                                                                  double socketTimeout) {
-        return new ScopedDbConnection(host, conn, socketTimeout);
+
+    // In the client code, these functions are the same as the ones above, since we don't have to
+    // do special handling of authentication for commands in the client.
+    ScopedDbConnection* ScopedDbConnection::getInternalScopedDbConnection() {
+        return getScopedDbConnection();
+    }
+
+    ScopedDbConnection* ScopedDbConnection::getInternalScopedDbConnection(const string& host,
+                                                                          double socketTimeout) {
+        return getScopedDbConnection( host, socketTimeout );
     }
 
 }

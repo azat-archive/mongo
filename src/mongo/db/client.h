@@ -136,7 +136,7 @@ namespace mongo {
         CurOp * _curOp;
         Context * _context;
         bool _shutdown; // to track if Client::shutdown() gets called
-        const std::string _desc;
+        std::string _desc;
         bool _god;
         AuthenticationInfo _ai;
         OpTime _lastOp;
@@ -239,6 +239,8 @@ namespace mongo {
             bool _doVersion;
             const string _ns;
             Database * _db;
+            
+            Timer _timer;
         }; // class Client::Context
 
         class WriteContext : boost::noncopyable {

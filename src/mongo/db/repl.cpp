@@ -205,7 +205,8 @@ namespace mongo {
                     wassert( !Lock::isLocked() );
                     // note: there is no so-style timeout on this connection; perhaps we should have one.
                     scoped_ptr<ScopedDbConnection> conn(
-                            ScopedDbConnection::getScopedDbConnection( s["host"].valuestr() ) );
+                            ScopedDbConnection::getInternalScopedDbConnection(
+                                    s["host"].valuestr() ) );
                     DBClientConnection *cliConn = dynamic_cast< DBClientConnection* >( &conn->conn() );
                     if ( cliConn && replAuthenticate( cliConn ) ) {
                         BSONObj first = conn->get()->findOne( (string)"local.oplog.$" + sourcename,
@@ -1085,6 +1086,10 @@ namespace mongo {
             log() << "replauthenticate: can't authenticate to master server, user:" << u << endl;
             return false;
         }
+        if ( internalSecurity.pwd.length() > 0 ) {
+            conn->setAuthenticationTable(
+                    AuthenticationTable::getInternalSecurityAuthenticationTable() );
+        }
         return true;
     }
 
@@ -1446,13 +1451,6 @@ namespace mongo {
         }
     }
 
-    void tempThread() {
-        while ( 1 ) {
-            out() << d.dbMutex.info().isLocked() << endl;
-            sleepmillis(100);
-        }
-    }
-
     void newRepl();
     void oldRepl();
     void startReplSets(ReplSetCmdline*);
@@ -1474,11 +1472,6 @@ namespace mongo {
         }
 
         oldRepl();
-
-        /* this was just to see if anything locks for longer than it should -- we need to be careful
-           not to be locked when trying to connect() or query() the other side.
-           */
-        //boost::thread tempt(tempThread);
 
         if( !replSettings.slave && !replSettings.master )
             return;
@@ -1555,7 +1548,7 @@ namespace mongo {
     } replApplyBatchSizeValidator;
     
     /** we allow queries to SimpleSlave's */
-    void replVerifyReadsOk(ParsedQuery* pq) {
+    void replVerifyReadsOk(const ParsedQuery* pq) {
         if( replSet ) {
             // todo: speed up the secondary case.  as written here there are 2 mutex entries, it
             // can b 1.

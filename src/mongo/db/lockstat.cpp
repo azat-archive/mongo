@@ -24,24 +24,45 @@
 namespace mongo { 
 
     BSONObj LockStat::report() const { 
-        BSONObjBuilder x;
-        BSONObjBuilder y;
-        x.append("R", timeLocked[0].load());
-        x.append("W", timeLocked[1].load());
-        if( timeLocked[2].load() || timeLocked[3].load() ) {
-            x.append("r", timeLocked[2].load());
-            x.append("w", timeLocked[3].load());
+        BSONObjBuilder b;
+
+        BSONObjBuilder t( b.subobjStart( "timeLocked" ) );
+        _append( b , timeLocked );
+        t.done();
+        
+        BSONObjBuilder a( b.subobjStart( "timeAcquiring" ) );
+        _append( a , timeAcquiring );
+        a.done();
+        
+        return b.obj();
+    }
+
+    void LockStat::report( StringBuilder& builder ) const {
+        bool prefixPrinted = false;
+        for ( int i=0; i < N; i++ ) {
+            if ( timeLocked[i].load() == 0 )
+                continue;
+            
+            if ( ! prefixPrinted ) {
+                builder << "locks(micros)";
+                prefixPrinted = true;
+            }
+
+            builder << ' ' << nameFor( i ) << ':' << timeLocked[i].load();
         }
-        y.append("R", timeAcquiring[0].load());
-        y.append("W", timeAcquiring[1].load());
-        if( timeAcquiring[2].load() || timeAcquiring[3].load() ) {
-            y.append("r", timeAcquiring[2].load());
-            y.append("w", timeAcquiring[3].load());
+        
+    }
+
+    void LockStat::_append( BSONObjBuilder& builder, const AtomicInt64* data ) {
+        if ( data[0].load() || data[1].load() ) {
+            builder.append( "R" , data[0].load() );
+            builder.append( "W" , data[1].load() );
         }
-        return BSON(
-            "timeLocked" << x.obj() << 
-            "timeAcquiring" << y.obj()
-        );
+        
+        if ( data[2].load() || data[3].load() ) {
+            builder.append( "r" , data[2].load() );
+            builder.append( "w" , data[3].load() );
+        }
     }
 
     unsigned LockStat::mapNo(char type) {
@@ -56,24 +77,22 @@ namespace mongo {
         return 0;
     }
 
-    LockStat::Acquiring::Acquiring(LockStat& _ls, char t) : ls(_ls) { 
-        type = mapNo(t);
-        dassert( type < N );
+    char LockStat::nameFor(unsigned offset) {
+        switch ( offset ) {
+        case 0: return 'R';
+        case 1: return 'W';
+        case 2: return 'r';
+        case 3: return 'w';
+        }
+        fassertFailed(16339);
     }
 
-    // note: we have race conditions on the following += 
-    // hmmm....
 
-    LockStat::Acquiring::~Acquiring() { 
-        ls.timeAcquiring[type].fetchAndAdd(static_cast<long long>(tmr.micros()));
-        if( type == 1 ) 
-            ls.W_Timer.reset();
+    void LockStat::recordAcquireTimeMicros( char type , long long micros ) {
+        timeAcquiring[mapNo(type)].fetchAndAdd( micros );
     }
-
-    void LockStat::unlocking(char tp) { 
-        unsigned type = mapNo(tp);
-        if( type == 1 ) 
-            timeLocked[type].fetchAndAdd(static_cast<long long>(W_Timer.micros()));
+    void LockStat::recordLockTimeMicros( char type , long long micros ) {
+        timeLocked[mapNo(type)].fetchAndAdd( micros );
     }
 
 }

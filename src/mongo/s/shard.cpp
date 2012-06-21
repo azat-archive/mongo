@@ -22,6 +22,7 @@
 #include "request.h"
 #include "client_info.h"
 #include "../db/commands.h"
+#include "mongo/client/dbclient_rs.h"
 #include "mongo/client/dbclientcursor.h"
 #include <set>
 
@@ -36,8 +37,9 @@ namespace mongo {
 
             list<BSONObj> all;
             {
-                scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getScopedDbConnection(
-                        configServer.getPrimary().getConnString() ) );
+                scoped_ptr<ScopedDbConnection> conn(
+                        ScopedDbConnection::getInternalScopedDbConnection(
+                                configServer.getPrimary().getConnString() ) );
                 auto_ptr<DBClientCursor> c = conn->get()->query( ShardNS::shard , Query() );
                 massert( 13632 , "couldn't get updated shard list from config server" , c.get() );
                 while ( c->more() ) {
@@ -63,7 +65,7 @@ namespace mongo {
                 _lookup.clear();
             }
             _rsLookup.clear();
-
+            
             for ( list<BSONObj>::iterator i=all.begin(); i!=all.end(); ++i ) {
                 BSONObj o = *i;
                 string name = o["_id"].String();
@@ -82,6 +84,14 @@ namespace mongo {
                 }
 
                 ShardPtr s( new Shard( name , host , maxSize , isDraining ) );
+
+                if ( o["tags"].type() == Array ) {
+                    vector<BSONElement> v = o["tags"].Array();
+                    for ( unsigned j=0; j<v.size(); j++ ) {
+                        s->addTag( v[j].String() );
+                    }
+                }
+
                 _lookup[name] = s;
                 _installHost( host , s );
             }
@@ -263,15 +273,6 @@ namespace mongo {
         _addr = addr;
         if ( !_addr.empty() ) {
             _cs = ConnectionString( addr , ConnectionString::SET );
-            _rsInit();
-        }
-    }
-
-    void Shard::_rsInit() {
-        if ( _cs.type() == ConnectionString::SET ) {
-            string x = _cs.getSetName();
-            massert( 14807 , str::stream() << "no set name for shard: " << _name << " " << _cs.toString() , x.size() );
-            _rs = ReplicaSetMonitor::get( x , _cs.getServers() );
         }
     }
 
@@ -279,22 +280,21 @@ namespace mongo {
         verify( _name.size() );
         _addr = cs.toString();
         _cs = cs;
-        _rsInit();
         staticShardInfo.set( _name , *this , true , false );
     }
 
     void Shard::reset( const string& ident ) {
         *this = staticShardInfo.findCopy( ident );
-        _rs.reset();
-        _rsInit();
     }
 
     bool Shard::containsNode( const string& node ) const {
         if ( _addr == node )
             return true;
 
-        if ( _rs && _rs->contains( node ) )
-            return true;
+        if ( _cs.type() == ConnectionString::SET ) {
+            ReplicaSetMonitorPtr rs = ReplicaSetMonitor::get( _cs.getSetName(), true );
+            return rs->contains( node );
+        }
 
         return false;
     }
@@ -319,9 +319,14 @@ namespace mongo {
         out.flush();
     }
 
-    BSONObj Shard::runCommand( const string& db , const BSONObj& cmd ) const {
-        scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getScopedDbConnection( getConnString() ) );
+    BSONObj Shard::runCommand( const string& db , const BSONObj& cmd , bool internal ) const {
+        scoped_ptr<ScopedDbConnection> conn;
+
+        if ( internal ) {
+            conn.reset( ScopedDbConnection::getInternalScopedDbConnection( getConnString() ) );
+        } else {
+            conn.reset( ScopedDbConnection::getScopedDbConnection( getConnString() ) );
+        }
         BSONObj res;
         bool ok = conn->get()->runCommand( db , cmd , res );
         if ( ! ok ) {
@@ -336,7 +341,7 @@ namespace mongo {
     }
 
     ShardStatus Shard::getStatus() const {
-        return ShardStatus( *this , runCommand( "admin" , BSON( "serverStatus" << 1 ) ) );
+        return ShardStatus( *this , runCommand( "admin" , BSON( "serverStatus" << 1 ) , true ) );
     }
 
     void Shard::reloadShardInfo() {
@@ -387,6 +392,11 @@ namespace mongo {
             LOG(2) << "calling onCreate auth for " << conn->toString() << endl;
             uassert( 15847, "can't authenticate to shard server",
                     conn->auth("local", internalSecurity.user, internalSecurity.pwd, err, false));
+            if ( conn->type() == ConnectionString::SYNC ) {
+                // Connections to the config servers should always have full access.
+                conn->setAuthenticationTable(
+                        AuthenticationTable::getInternalSecurityAuthenticationTable() );
+            }
         }
 
         if ( _shardedConnections && versionManager.isVersionableCB( conn ) ) {

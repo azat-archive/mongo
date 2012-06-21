@@ -22,8 +22,9 @@
 
 #include "pch.h"
 
-#include "mongo/db/jsobj.h"
 #include "mongo/client/authlevel.h"
+#include "mongo/client/authentication_table.h"
+#include "mongo/db/jsobj.h"
 #include "mongo/util/net/message.h"
 #include "mongo/util/net/message_port.h"
 
@@ -130,6 +131,38 @@ namespace mongo {
     enum ReservedOptions {
         Reserved_InsertOption_ContinueOnError = 1 << 0 ,
         Reserved_FromWriteback = 1 << 1
+    };
+
+    enum ReadPreference {
+        /**
+         * Read from primary only. All operations produce an error (throw an
+         * exception where applicable) if primary is unavailable. Cannot be
+         * combined with tags.
+         */
+        ReadPreference_PrimaryOnly = 0,
+
+        /**
+         * Read from primary if available, otherwise a secondary. Tags will
+         * only be applied in the event that the primary is unavailable and
+         * a secondary is read from. In this event only secondaries matching
+         * the tags provided would be read from.
+         */
+        ReadPreference_PrimaryPreferred,
+
+        /**
+         * Read from secondary if available, otherwise error.
+         */
+        ReadPreference_SecondaryOnly,
+
+        /**
+         * Read from a secondary if available, otherwise read from the primary.
+         */
+        ReadPreference_SecondaryPreferred,
+
+        /**
+         * Read from any member.
+         */
+        ReadPreference_Nearest,
     };
 
     class DBClientBase;
@@ -473,7 +506,14 @@ namespace mongo {
 
         virtual void remove( const string &ns , Query query, bool justOne = 0 ) = 0;
 
-        virtual void update( const string &ns , Query query , BSONObj obj , bool upsert = 0 , bool multi = 0 ) = 0;
+        virtual void remove( const string &ns , Query query, int flags ) = 0;
+
+        virtual void update( const string &ns,
+                             Query query,
+                             BSONObj obj,
+                             bool upsert = false, bool multi = false ) = 0;
+
+        virtual void update( const string &ns, Query query, BSONObj obj, int flags ) = 0;
 
         virtual ~DBClientInterface() { }
 
@@ -504,7 +544,10 @@ namespace mongo {
         /** controls how chatty the client is about network errors & such.  See log.h */
         int _logLevel;
 
-        DBClientWithCommands() : _logLevel(0), _cachedAvailableOptions( (enum QueryOptions)0 ), _haveCachedAvailableOptions(false) { }
+        DBClientWithCommands() : _logLevel(0),
+                _cachedAvailableOptions( (enum QueryOptions)0 ),
+                _haveCachedAvailableOptions(false),
+                _hasAuthentication(false) { }
 
         /** helper function.  run a simple command where the command expression is simply
               { command : 1 }
@@ -516,16 +559,21 @@ namespace mongo {
 
         /** Run a database command.  Database commands are represented as BSON objects.  Common database
             commands have prebuilt helper functions -- see below.  If a helper is not available you can
-            directly call runCommand.
+            directly call runCommand.  If _authTable has been set, will append a BSON representation of
+            that AuthenticationTable to the command object, unless an AuthenticationTable object has been
+            passed to this method directly, in which case it will use that instead of _authTable.
 
             @param dbname database name.  Use "admin" for global administrative commands.
             @param cmd  the command object to execute.  For example, { ismaster : 1 }
             @param info the result object the database returns. Typically has { ok : ..., errmsg : ... } fields
                    set.
             @param options see enum QueryOptions - normally not needed to run a command
+            @param auth if set, the BSONObj representation will be appended to the command object sent
+
             @return true if the command returned "ok".
         */
-        virtual bool runCommand(const string &dbname, const BSONObj& cmd, BSONObj &info, int options=0);
+        virtual bool runCommand(const string &dbname, const BSONObj& cmd, BSONObj &info,
+                                int options=0, const AuthenticationTable* auth = NULL);
 
         /** Authorize access to a particular database.
             Authentication is separate for each database on the server -- you may authenticate for any
@@ -605,15 +653,21 @@ namespace mongo {
         */
         bool resetError() { return simpleCommand("admin", 0, "reseterror"); }
 
-        /** Delete the specified collection. */
-        virtual bool dropCollection( const string &ns ) {
+        /** Delete the specified collection.
+         *  @param info An optional output parameter that receives the result object the database
+         *  returns from the drop command.  May be null if the caller doesn't need that info.
+         */
+        virtual bool dropCollection( const string &ns, BSONObj* info = NULL ) {
             string db = nsGetDB( ns );
             string coll = nsGetCollection( ns );
             uassert( 10011 ,  "no collection name", coll.size() );
 
-            BSONObj info;
+            BSONObj temp;
+            if ( info == NULL ) {
+                info = &temp;
+            }
 
-            bool res = runCommand( db.c_str() , BSON( "drop" << coll ) , info );
+            bool res = runCommand( db.c_str() , BSON( "drop" << coll ) , *info );
             resetIndexCache();
             return res;
         }
@@ -765,6 +819,9 @@ namespace mongo {
 
         bool exists( const string& ns );
 
+        virtual void setAuthenticationTable( const AuthenticationTable& auth );
+        virtual void clearAuthenticationTable();
+
         /** Create an index if it does not already exist.
             ensureIndex calls are remembered so it is safe/fast to call this function many
             times in your code.
@@ -826,9 +883,14 @@ namespace mongo {
 
         virtual QueryOptions _lookupAvailableOptions();
 
+        bool hasAuthenticationTable();
+        AuthenticationTable& getAuthenticationTable();
+
     private:
         enum QueryOptions _cachedAvailableOptions;
         bool _haveCachedAvailableOptions;
+        AuthenticationTable _authTable;
+        bool _hasAuthentication;
     };
 
     /**
@@ -903,15 +965,22 @@ namespace mongo {
         virtual void insert( const string &ns, const vector< BSONObj >& v , int flags=0);
 
         /**
+           updates objects matching query
+         */
+        virtual void update( const string &ns,
+                             Query query,
+                             BSONObj obj,
+                             bool upsert = false, bool multi = false );
+
+        virtual void update( const string &ns, Query query, BSONObj obj, int flags );
+
+        /**
            remove matching objects from the database
            @param justOne if this true, then once a single match is found will stop
          */
         virtual void remove( const string &ns , Query q , bool justOne = 0 );
 
-        /**
-           updates objects matching query
-         */
-        virtual void update( const string &ns , Query query , BSONObj obj , bool upsert = false , bool multi = false );
+        virtual void remove( const string &ns , Query query, int flags );
 
         virtual bool isFailed() const = 0;
 
@@ -1012,7 +1081,11 @@ namespace mongo {
                                           const BSONObj *fieldsToReturn,
                                           int queryOptions );
 
-        virtual bool runCommand(const string &dbname, const BSONObj& cmd, BSONObj &info, int options=0);
+        virtual bool runCommand(const string &dbname,
+                                const BSONObj& cmd,
+                                BSONObj &info,
+                                int options=0,
+                                const AuthenticationTable* auth=NULL);
 
         /**
            @return true if this connection is currently in a failed state.  When autoreconnect is on,

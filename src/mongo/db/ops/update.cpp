@@ -250,7 +250,18 @@ namespace mongo {
 
                     if ( didYield ) {
                         d = nsdetails(ns);
+                        if ( ! d )
+                            break;
                         nsdt = &NamespaceDetailsTransient::get(ns);
+                        if ( mods.get() && ! mods->isIndexed() ) {
+                            // we need to re-check indexes
+                            set<string> bgKeys;
+                            if ( d->indexBuildInProgress )
+                                d->inProgIdx().keyPattern().getFieldNames(bgKeys);
+                            mods->updateIsIndexed( nsdt->indexKeys() , &bgKeys );
+                            modsIsIndexed = mods->isIndexed();
+                        }
+
                     }
 
                 } // end yielding block
@@ -267,23 +278,6 @@ namespace mongo {
 
                 if ( !c->currentMatches( &details ) ) {
                     c->advance();
-
-                    if ( debug.nscanned % 256 == 0 && ! atomic ) {
-                        if ( cc.get() == 0 ) {
-                            shared_ptr< Cursor > cPtr = c;
-                            cc.reset( new ClientCursor( QueryOption_NoCursorTimeout , cPtr , ns ) );
-                        }
-                        if ( ! cc->yield() ) {
-                            cc.release();
-                            // TODO should we assert or something?
-                            break;
-                        }
-                        if ( !c->ok() ) {
-                            break;
-                        }
-                        d = nsdetails(ns);
-                        nsdt = &NamespaceDetailsTransient::get(ns);
-                    }
                     continue;
                 }
 
@@ -422,22 +416,6 @@ namespace mongo {
                         return UpdateResult( 1 , 1 , numModded , BSONObj() );
                     if ( willAdvanceCursor )
                         c->recoverFromTouchingEarlierIterate();
-
-                    if ( debug.nscanned % 64 == 0 && ! atomic ) {
-                        if ( cc.get() == 0 ) {
-                            shared_ptr< Cursor > cPtr = c;
-                            cc.reset( new ClientCursor( QueryOption_NoCursorTimeout , cPtr , ns ) );
-                        }
-                        if ( ! cc->yield() ) {
-                            cc.release();
-                            break;
-                        }
-                        if ( !c->ok() ) {
-                            break;
-                        }
-                        d = nsdetails(ns);
-                        nsdt = &NamespaceDetailsTransient::get(ns);
-                    }
 
                     getDur().commitIfNeeded();
 

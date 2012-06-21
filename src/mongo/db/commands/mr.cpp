@@ -464,12 +464,37 @@ namespace mongo {
             return postProcessCollectionNonAtomic(op, pm);
         }
 
+        //
+        // For SERVER-6116 - can't handle version errors in count currently
+        //
+
+        /**
+         * Runs count and disables version errors.
+         *
+         * TODO: make count work with versioning
+         */
+        unsigned long long _safeCount( // Can't be const b/c count isn't
+                                       /* const */ DBDirectClient& db,
+                                       const string &ns,
+                                       const BSONObj& query = BSONObj(),
+                                       int options = 0,
+                                       int limit = 0,
+                                       int skip = 0 )
+        {
+            ShardForceVersionOkModeBlock ignoreVersion; // ignore versioning here
+            return db.count( ns, query, options, limit, skip );
+        }
+
+        //
+        // End SERVER-6116
+        //
+
         long long State::postProcessCollectionNonAtomic(CurOp* op, ProgressMeterHolder& pm) {
 
             if ( _config.finalLong == _config.tempLong )
-                return _db.count( _config.finalLong );
+                return _safeCount( _db, _config.finalLong );
 
-            if ( _config.outType == Config::REPLACE || _db.count( _config.finalLong ) == 0 ) {
+            if ( _config.outType == Config::REPLACE || _safeCount( _db, _config.finalLong ) == 0 ) {
                 Lock::GlobalWrite lock; // TODO(erh): why global???
                 // replace: just rename from temp to final collection name, dropping previous collection
                 _db.dropCollection( _config.finalLong );
@@ -487,7 +512,7 @@ namespace mongo {
             }
             else if ( _config.outType == Config::MERGE ) {
                 // merge: upsert new docs into old collection
-                op->setMessage( "m/r: merge post processing" , _db.count( _config.tempLong, BSONObj() ) );
+                op->setMessage( "m/r: merge post processing" , _safeCount( _db, _config.tempLong, BSONObj() ) );
                 auto_ptr<DBClientCursor> cursor = _db.query( _config.tempLong , BSONObj() );
                 while ( cursor->more() ) {
                     Lock::DBWrite lock( _config.finalLong );
@@ -550,7 +575,7 @@ namespace mongo {
                 pm.finished();
             }
 
-            return _db.count( _config.finalLong );
+            return _safeCount( _db, _config.finalLong );
         }
 
         /**
@@ -583,7 +608,7 @@ namespace mongo {
         }
 
         long long State::incomingDocuments() {
-            return _db.count( _config.ns , _config.filter , QueryOption_SlaveOk , (unsigned) _config.limit );
+            return _safeCount( _db, _config.ns , _config.filter , QueryOption_SlaveOk , (unsigned) _config.limit );
         }
 
         State::~State() {
@@ -757,7 +782,7 @@ namespace mongo {
             BSONObj prev;
             BSONList all;
 
-            verify( pm == op->setMessage( "m/r: (3/3) final reduce to collection" , _db.count( _config.incLong, BSONObj(), QueryOption_SlaveOk ) ) );
+            verify( pm == op->setMessage( "m/r: (3/3) final reduce to collection" , _safeCount( _db, _config.incLong, BSONObj(), QueryOption_SlaveOk ) ) );
 
             shared_ptr<Cursor> temp =
             NamespaceDetailsTransient::bestGuessCursor( _config.incLong.c_str() , BSONObj() ,
@@ -774,7 +799,7 @@ namespace mongo {
                 if ( o.woSortOrder( prev , sortKey ) == 0 ) {
                     // object is same as previous, add to array
                     all.push_back( o );
-                    if ( pm->hits() % 1000 == 0 ) {
+                    if ( pm->hits() % 100 == 0 ) {
                         if ( ! cursor->yield() ) {
                             cursor.release();
                             break;
@@ -1115,7 +1140,7 @@ namespace mongo {
                             if ( config.verbose ) mapTime += mt.micros();
 
                             num++;
-                            if ( num % 1000 == 0 ) {
+                            if ( num % 100 == 0 ) {
                                 // try to yield lock regularly
                                 ClientCursor::YieldLock yield (cursor.get());
                                 Timer t;
@@ -1215,9 +1240,14 @@ namespace mongo {
                 ShardedConnectionInfo::addHook();
                 // legacy name
                 string shardedOutputCollection = cmdObj["shardedOutputCollection"].valuestrsafe();
-                string inputNS = cmdObj["inputNS"].valuestrsafe();
-                if (inputNS.empty())
+                verify( shardedOutputCollection.size() > 0 );
+                string inputNS;
+                if ( cmdObj["inputDB"].type() == String ) {
+                    inputNS = cmdObj["inputDB"].String() + "." + shardedOutputCollection;
+                }
+                else {
                     inputNS = dbname + "." + shardedOutputCollection;
+                }
 
                 Client& client = cc();
                 CurOp * op = client.curop();

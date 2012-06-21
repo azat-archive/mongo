@@ -41,6 +41,7 @@ namespace mongo {
     string ShardNS::database = "config.databases";
     string ShardNS::collection = "config.collections";
     string ShardNS::chunk = "config.chunks";
+    string ShardNS::tags = "config.tags";
 
     string ShardNS::mongos = "config.mongos";
     string ShardNS::settings = "config.settings";
@@ -68,11 +69,23 @@ namespace mongo {
         // Do this *first* so we're invisible to everyone else
         manager->loadExistingRanges( configServer.getPrimary().getConnString() );
 
-        _cm = ChunkManagerPtr( manager );
-        _key = manager->getShardKey().key().getOwned();
-        _unqiue = manager->isUnique();
-        _dirty = true;
-        _dropped = false;
+        //
+        // Collections with no chunks are unsharded, no matter what the collections entry says
+        // This helps prevent errors when dropping in a different process
+        //
+
+        if( manager->numChunks() != 0 ){
+            _cm = ChunkManagerPtr( manager );
+            _key = manager->getShardKey().key().getOwned();
+            _unqiue = manager->isUnique();
+            _dirty = true;
+            _dropped = false;
+        }
+        else{
+            warning() << "no chunks found for collection " << manager->getns()
+                      << ", assuming unsharded" << endl;
+            unshard();
+        }
     }
 
     void DBConfig::CollectionInfo::unshard() {
@@ -135,7 +148,7 @@ namespace mongo {
         return _primary;
     }
 
-    void DBConfig::enableSharding() {
+    void DBConfig::enableSharding( bool save ) {
         if ( _shardingEnabled )
             return;
         
@@ -143,7 +156,7 @@ namespace mongo {
 
         scoped_lock lk( _lock );
         _shardingEnabled = true;
-        _save();
+        if( save ) _save();
     }
 
     /**
@@ -201,6 +214,9 @@ namespace mongo {
 
     bool DBConfig::removeSharding( const string& ns ) {
         if ( ! _shardingEnabled ) {
+
+            warning() << "could not remove sharding for collection " << ns
+                      << ", sharding not enabled for db" << endl;
             return false;
         }
 
@@ -212,8 +228,12 @@ namespace mongo {
             return false;
 
         CollectionInfo& ci = _collections[ns];
-        if ( ! ci.isSharded() )
+        if ( ! ci.isSharded() ){
+
+            warning() << "could not remove sharding for collection " << ns
+                      << ", no sharding information found" << endl;
             return false;
+        }
 
         ci.unshard();
         _save( false, true );
@@ -307,8 +327,8 @@ namespace mongo {
 
         BSONObj newest;
         if ( oldVersion.isSet() && ! forceReload ) {
-            scoped_ptr<ScopedDbConnection> conn(
-                    ScopedDbConnection::getScopedDbConnection( configServer.modelServer(), 30.0 ) );
+            scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getInternalScopedDbConnection(
+                    configServer.modelServer(), 30.0 ) );
             newest = conn->get()->findOne( ShardNS::chunk ,
                                            Query( BSON( "ns" << ns ) ).sort( "lastmod" , -1 ) );
             conn->done();
@@ -343,8 +363,15 @@ namespace mongo {
                 scoped_lock lk( _lock );
                 CollectionInfo& ci = _collections[ns];
                 if ( ci.isSharded() && ci.getCM() ) {
-                    ShardChunkVersion currentVersion = ShardChunkVersion::fromBSON( newest, "lastmod" );
-                    if ( currentVersion.isEquivalentTo( ci.getCM()->getVersion() ) ) {
+
+                    ShardChunkVersion currentVersion =
+                            ShardChunkVersion::fromBSON( newest, "lastmod" );
+
+                    // Only reload if the version we found is newer than our own in the same
+                    // epoch
+                    if( currentVersion <= ci.getCM()->getVersion() &&
+                        ci.getCM()->getVersion().hasCompatibleEpoch( currentVersion ) )
+                    {
                         return ci.getCM();
                     }
                 }
@@ -433,8 +460,8 @@ namespace mongo {
     }
 
     bool DBConfig::_load() {
-        scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getScopedDbConnection( configServer.modelServer(), 30.0 ) );
+        scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getInternalScopedDbConnection(
+                configServer.modelServer(), 30.0 ) );
 
         BSONObj o = conn->get()->findOne( ShardNS::database , BSON( "_id" << _name ) );
 
@@ -448,13 +475,28 @@ namespace mongo {
         BSONObjBuilder b;
         b.appendRegex( "_id" , (string)"^" + pcrecpp::RE::QuoteMeta( _name ) + "\\." );
 
+        int numCollsErased = 0;
+        int numCollsSharded = 0;
+
         auto_ptr<DBClientCursor> cursor = conn->get()->query( ShardNS::collection, b.obj() );
         verify( cursor.get() );
         while ( cursor->more() ) {
+
             BSONObj o = cursor->next();
-            if( o["dropped"].trueValue() ) _collections.erase( o["_id"].String() );
-            else _collections[o["_id"].String()] = CollectionInfo( o );
+            string collName = o["_id"].String();
+
+            if( o["dropped"].trueValue() ){
+                _collections.erase( collName );
+                numCollsErased++;
+            }
+            else{
+                _collections[ collName ] = CollectionInfo( o );
+                if( _collections[ collName ].isSharded() ) numCollsSharded++;
+            }
         }
+
+        LOG(2) << "found " << numCollsErased << " dropped collections and "
+               << numCollsSharded << " sharded collections for database " << _name << endl;
 
         conn->done();
 
@@ -462,8 +504,8 @@ namespace mongo {
     }
 
     void DBConfig::_save( bool db, bool coll ) {
-        scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getScopedDbConnection( configServer.modelServer(), 30.0 ) );
+        scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getInternalScopedDbConnection(
+                configServer.modelServer(), 30.0 ) );
 
         if( db ){
 
@@ -494,8 +536,21 @@ namespace mongo {
     }
 
     bool DBConfig::reload() {
-        scoped_lock lk( _lock );
-        return _reload();
+        bool successful = false;
+
+        {
+            scoped_lock lk( _lock );
+            successful = _reload();
+        }
+
+        //
+        // If we aren't successful loading the database entry, we don't want to keep the stale
+        // object around which has invalid data.  We should remove it instead.
+        //
+
+        if( ! successful ) grid.removeDBIfExists( *this );
+
+        return successful;
     }
 
     bool DBConfig::_reload() {
@@ -524,8 +579,8 @@ namespace mongo {
         // 2
         grid.removeDB( _name );
         {
-            scoped_ptr<ScopedDbConnection> conn(
-                    ScopedDbConnection::getScopedDbConnection(configServer.modelServer(), 30.0 ) );
+            scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getInternalScopedDbConnection(
+                    configServer.modelServer(), 30.0 ) );
             conn->get()->remove( ShardNS::database , BSON( "_id" << _name ) );
             errmsg = conn->get()->getLastError();
             if ( ! errmsg.empty() ) {
@@ -609,7 +664,14 @@ namespace mongo {
 
             i->second.getCM()->getAllShards( allServers );
             i->second.getCM()->drop( i->second.getCM() );
-            uassert( 10176 , str::stream() << "shard state missing for " << i->first , removeSharding( i->first ) );
+
+            // We should warn, but it's not a fatal error if someone else reloaded the db/coll as
+            // unsharded in the meantime
+            if( ! removeSharding( i->first ) ){
+                warning() << "collection " << i->first
+                          << " was reloaded as unsharded before drop completed"
+                          << " during drop of all collections" << endl;
+            }
 
             num++;
             uassert( 10184 ,  "_dropShardedCollections too many collections - bailing" , num < 100000 );
@@ -708,7 +770,7 @@ namespace mongo {
             BSONObj x;
             try {
                 scoped_ptr<ScopedDbConnection> conn(
-                        ScopedDbConnection::getScopedDbConnection( _config[i], 30.0 ) );
+                        ScopedDbConnection::getInternalScopedDbConnection( _config[i], 30.0 ) );
 
                 // check auth
                 conn->get()->update("config.foo.bar", BSONObj(), BSON("x" << 1));
@@ -799,7 +861,8 @@ namespace mongo {
     bool ConfigServer::allUp( string& errmsg ) {
         try {
             scoped_ptr<ScopedDbConnection> conn(
-                    ScopedDbConnection::getScopedDbConnection( _primary.getConnString(), 30.0 ) );
+                    ScopedDbConnection::getInternalScopedDbConnection( _primary.getConnString(),
+                                                                       30.0 ) );
             conn->get()->getLastError();
             conn->done();
             return true;
@@ -814,7 +877,8 @@ namespace mongo {
 
     int ConfigServer::dbConfigVersion() {
         scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getScopedDbConnection( _primary.getConnString(), 30.0 ) );
+                ScopedDbConnection::getInternalScopedDbConnection( _primary.getConnString(),
+                                                                   30.0 ) );
         int version = dbConfigVersion( conn->conn() );
         conn->done();
         return version;
@@ -841,7 +905,8 @@ namespace mongo {
         set<string> got;
 
         scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getScopedDbConnection( _primary.getConnString(), 30.0 ) );
+                ScopedDbConnection::getInternalScopedDbConnection( _primary.getConnString(),
+                                                                   30.0 ) );
         
         try {
             
@@ -930,7 +995,8 @@ namespace mongo {
             verify( _primary.ok() );
 
             scoped_ptr<ScopedDbConnection> conn(
-                    ScopedDbConnection::getScopedDbConnection( _primary.getConnString(), 30.0 ) );
+                    ScopedDbConnection::getInternalScopedDbConnection( _primary.getConnString(),
+                                                                       30.0 ) );
 
             static bool createdCapped = false;
             if ( ! createdCapped ) {

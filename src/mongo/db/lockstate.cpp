@@ -34,7 +34,8 @@ namespace mongo {
           _nestableCount(0), 
           _otherCount(0), 
           _otherLock(NULL),
-          _scopedLk(NULL)
+          _scopedLk(NULL),
+          _lockPending(false)
     {
     }
 
@@ -48,6 +49,10 @@ namespace mongo {
 
     bool LockState::hasAnyReadLock() const { 
         return _threadState == 'r' || _threadState == 'R';
+    }
+
+    bool LockState::hasAnyWriteLock() const { 
+        return _threadState == 'w' || _threadState == 'W';
     }
 
     bool LockState::isLocked( const StringData& ns ) {
@@ -68,7 +73,7 @@ namespace mongo {
         return false;
     }
 
-    void LockState::locked( char newState ) {
+    void LockState::lockedStart( char newState ) {
         _threadState = newState;
     }
     void LockState::unlocked() {
@@ -88,6 +93,11 @@ namespace mongo {
         return "?";
     }
 
+    BSONObj LockState::reportState() {
+        BSONObjBuilder b;
+        reportState( b );
+        return b.obj();
+    }
     
     /** Note: this is is called by the currentOp command, which is a different 
               thread. So be careful about thread safety here. For example reading 
@@ -99,20 +109,20 @@ namespace mongo {
             char buf[2];
             buf[0] = _threadState; 
             buf[1] = 0;
-            b.append(".", buf);
+            b.append("^", buf);
         }
         if( _nestableCount ) {
             string s = "?";
             if( _whichNestable == Lock::local ) 
-                s = ".local";
+                s = "^local";
             else if( _whichNestable == Lock::admin ) 
-                s = ".admin";
+                s = "^admin";
             b.append(s, kind(_nestableCount));
         }
         if( _otherCount ) { 
             WrapperForRWLock *k = _otherLock;
             if( k ) {
-                string s = ".";
+                string s = "^";
                 s += k->name();
                 b.append(s, kind(_otherCount));
             }
@@ -120,6 +130,7 @@ namespace mongo {
         BSONObj o = b.obj();
         if( !o.isEmpty() ) 
             res.append("locks", o);
+        res.append( "waitingForLock" , _lockPending );
     }
 
     void LockState::Dump() {
@@ -204,5 +215,30 @@ namespace mongo {
         _otherLock = 0;
     }
 
+    LockStat* LockState::getRelevantLockStat() {
+        if ( _otherLock )
+            return &_otherLock->stats;
+        
+        if ( isRW() ) 
+            return Lock::globalLockStat();
+        
+        if ( _whichNestable )
+            return Lock::nestableLockStat( _whichNestable );
 
+        return 0;
+    }
+
+
+    Acquiring::Acquiring( Lock::ScopedLock* lock,  LockState& ls )
+        : _lock( lock ), _ls( ls ){
+        _ls._lockPending = true;
+    }
+
+    Acquiring::~Acquiring() {
+        _ls._lockPending = false;
+        LockStat* stat = _ls.getRelevantLockStat();
+        if ( stat && _lock )
+            stat->recordAcquireTimeMicros( _ls.threadState(), _lock->acquireFinished( stat ) );
+    }
+    
 }

@@ -320,9 +320,38 @@ namespace mongo {
         return QueryOptions(0);
     }
 
-    inline bool DBClientWithCommands::runCommand(const string &dbname, const BSONObj& cmd, BSONObj &info, int options) {
+    void DBClientWithCommands::setAuthenticationTable( const AuthenticationTable& auth ) {
+        _authTable = auth;
+        _hasAuthentication = true;
+    }
+
+    void DBClientWithCommands::clearAuthenticationTable() {
+        _authTable.clearAuth(); // This probably isn't necessary, but better to be safe.
+        _hasAuthentication = false;
+    }
+
+    bool DBClientWithCommands::hasAuthenticationTable() {
+        return _hasAuthentication;
+    }
+
+    AuthenticationTable& DBClientWithCommands::getAuthenticationTable() {
+        return _authTable;
+    }
+
+    inline bool DBClientWithCommands::runCommand(const string &dbname,
+                                                 const BSONObj& cmd,
+                                                 BSONObj &info,
+                                                 int options,
+                                                 const AuthenticationTable* auth) {
         string ns = dbname + ".$cmd";
-        info = findOne(ns, cmd, 0 , options);
+        BSONObj actualCmd = cmd;
+        if ( _hasAuthentication || auth ) {
+            const AuthenticationTable* authTable = (auth ? auth : &_authTable);
+            LOG(4) << "Sending command " << cmd << " to " << getServerAddress() <<
+                    " with $auth: " << authTable->toBSON() << endl;
+            actualCmd = authTable->copyCommandObjAddingAuth( cmd );
+        }
+        info = findOne(ns, actualCmd, 0 , options);
         return isOk(info);
     }
 
@@ -692,8 +721,12 @@ namespace mongo {
     }
 
 
-    inline bool DBClientConnection::runCommand(const string &dbname, const BSONObj& cmd, BSONObj &info, int options) {
-        if ( DBClientWithCommands::runCommand( dbname , cmd , info , options ) )
+    inline bool DBClientConnection::runCommand(const string &dbname,
+                                               const BSONObj& cmd,
+                                               BSONObj &info,
+                                               int options,
+                                               const AuthenticationTable* auth) {
+        if ( DBClientWithCommands::runCommand( dbname , cmd , info , options , auth ) )
             return true;
         
         if ( clientSet && isNotMasterErrorString( info["errmsg"] ) ) {
@@ -841,7 +874,15 @@ namespace mongo {
         Message toSend;
 
         BufBuilder b;
-        b.appendNum( flags );
+
+        int reservedFlags = 0;
+        if( flags & InsertOption_ContinueOnError )
+            reservedFlags |= Reserved_InsertOption_ContinueOnError;
+
+        if( flags & WriteOption_FromWriteback )
+            reservedFlags |= Reserved_FromWriteback;
+
+        b.appendNum( reservedFlags );
         b.appendStr( ns );
         obj.appendSelfToBufBuilder( b );
 
@@ -850,11 +891,22 @@ namespace mongo {
         say( toSend );
     }
 
+    // TODO: Merge with other insert implementation?
     void DBClientBase::insert( const string & ns , const vector< BSONObj > &v , int flags) {
         Message toSend;
 
         BufBuilder b;
-        b.appendNum( flags );
+
+        int reservedFlags = 0;
+        if( flags & InsertOption_ContinueOnError )
+            reservedFlags |= Reserved_InsertOption_ContinueOnError;
+
+        if( flags & WriteOption_FromWriteback ){
+            reservedFlags |= Reserved_FromWriteback;
+            flags ^= WriteOption_FromWriteback;
+        }
+
+        b.appendNum( reservedFlags );
         b.appendStr( ns );
         for( vector< BSONObj >::const_iterator i = v.begin(); i != v.end(); ++i )
             i->appendSelfToBufBuilder( b );
@@ -865,16 +917,23 @@ namespace mongo {
     }
 
     void DBClientBase::remove( const string & ns , Query obj , bool justOne ) {
+        int flags = 0;
+        if( justOne ) flags |= RemoveOption_JustOne;
+        remove( ns, obj, flags );
+    }
+
+    void DBClientBase::remove( const string & ns , Query obj , int flags ) {
         Message toSend;
 
         BufBuilder b;
-        int opts = 0;
-        b.appendNum( opts );
-        b.appendStr( ns );
+        int reservedFlags = 0;
+        if( flags & WriteOption_FromWriteback ){
+            reservedFlags |= WriteOption_FromWriteback;
+            flags ^= WriteOption_FromWriteback;
+        }
 
-        int flags = 0;
-        if ( justOne )
-            flags |= RemoveOption_JustOne;
+        b.appendNum( reservedFlags );
+        b.appendStr( ns );
         b.appendNum( flags );
 
         obj.obj.appendSelfToBufBuilder( b );
@@ -884,15 +943,25 @@ namespace mongo {
         say( toSend );
     }
 
-    void DBClientBase::update( const string & ns , Query query , BSONObj obj , bool upsert , bool multi ) {
-
-        BufBuilder b;
-        b.appendNum( (int)0 ); // reserved
-        b.appendStr( ns );
-
+    void DBClientBase::update( const string & ns , Query query , BSONObj obj , bool upsert, bool multi ) {
         int flags = 0;
         if ( upsert ) flags |= UpdateOption_Upsert;
         if ( multi ) flags |= UpdateOption_Multi;
+        update( ns, query, obj, flags );
+    }
+
+    void DBClientBase::update( const string & ns , Query query , BSONObj obj , int flags ) {
+
+        BufBuilder b;
+
+        int reservedFlags = 0;
+        if( flags & WriteOption_FromWriteback ){
+            reservedFlags |= Reserved_FromWriteback;
+            flags ^= WriteOption_FromWriteback;
+        }
+
+        b.appendNum( reservedFlags ); // reserved
+        b.appendStr( ns );
         b.appendNum( flags );
 
         query.obj.appendSelfToBufBuilder( b );
@@ -902,10 +971,7 @@ namespace mongo {
         toSend.setData( dbUpdate , b.buf() , b.len() );
 
         say( toSend );
-
-
     }
-
 
     
     auto_ptr<DBClientCursor> DBClientWithCommands::getIndexes( const string &ns ) {

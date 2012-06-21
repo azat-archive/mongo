@@ -38,7 +38,7 @@ namespace mongo {
 
         void reset();
         
-        string toString() const;
+        string report( const CurOp& curop ) const;
         void append( const CurOp& curop, BSONObjBuilder& b ) const;
 
         // -------------------
@@ -155,21 +155,13 @@ namespace mongo {
         BSONObj query() { return _query.get();  }
         void appendQuery( BSONObjBuilder& b , const StringData& name ) const { _query.append( b , name ); }
         
-        void ensureStarted() {
-            if ( _start == 0 )
-                _start = _checkpoint = curTimeMicros64();
-        }
+        void ensureStarted();
         bool isStarted() const { return _start > 0; }
         void enter( Client::Context * context );
         void leave( Client::Context * context );
         void reset();
         void reset( const HostAndPort& remote, int op );
         void markCommand() { _command = true; }
-        void waitingForLock( char type ) {
-            _waitingForLock = true;
-            _lockType = type;
-        }
-        void gotLock()             { _waitingForLock = false; }
         OpDebug& debug()           { return _debug; }
         int profileLevel() const   { return _dbprofile; }
         const char * getNS() const { return _ns; }
@@ -186,9 +178,7 @@ namespace mongo {
         /** if this op is running */
         bool active() const { return _active; }
 
-        char lockType() const { return _lockType; }
         bool displayInCurop() const { return _active && ! _suppressFromCurop; }
-        bool isWaitingForLock() const { return _waitingForLock; }
         int getOp() const { return _op; }
         unsigned long long startTime() { // micros
             ensureStarted();
@@ -221,16 +211,15 @@ namespace mongo {
         bool killed() const { return _killed; }
         void yielded() { _numYields++; }
         int numYields() const { return _numYields; }
-        void setNS(const char *ns) {
-            strncpy(_ns, ns, Namespace::MaxNsLen);
-            _ns[Namespace::MaxNsLen] = 0;
-        }
-        
         void suppressFromCurop() { _suppressFromCurop = true; }
         
         long long getExpectedLatencyMs() const { return _expectedLatencyMs; }
         void setExpectedLatencyMs( long long latency ) { _expectedLatencyMs = latency; }
 
+        void recordGlobalTime( long long micros ) const;
+        
+        const LockStat& lockStat() const { return _lockStat; }
+        LockStat& lockStat() { return _lockStat; }
     private:
         friend class Client;
         void _reset();
@@ -239,14 +228,11 @@ namespace mongo {
         Client * _client;
         CurOp * _wrapped;
         unsigned long long _start;
-        unsigned long long _checkpoint;
         unsigned long long _end;
         bool _active;
         bool _suppressFromCurop; // unless $all is set
         int _op;
         bool _command;
-        char _lockType;                   // r w R W
-        bool _waitingForLock;
         int _dbprofile;                  // 0=off, 1=slow, 2=all
         AtomicUInt _opNum;               // todo: simple being "unsigned" may make more sense here
         char _ns[Namespace::MaxNsLen+2];
@@ -257,7 +243,8 @@ namespace mongo {
         ProgressMeter _progressMeter;
         volatile bool _killed;
         int _numYields;
-
+        LockStat _lockStat;
+        
         // this is how much "extra" time a query might take
         // a writebacklisten for example will block for 30s 
         // so this should be 30000 in that case

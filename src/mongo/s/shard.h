@@ -21,7 +21,6 @@
 #include "pch.h"
 
 #include "mongo/client/connpool.h"
-#include "mongo/client/dbclient_rs.h"
 
 namespace mongo {
 
@@ -49,12 +48,13 @@ namespace mongo {
 
         Shard( const Shard& other )
             : _name( other._name ) , _addr( other._addr ) , _cs( other._cs ) , 
-              _maxSize( other._maxSize ) , _isDraining( other._isDraining ) , _rs( other._rs ) {
+              _maxSize( other._maxSize ) , _isDraining( other._isDraining ),
+              _tags( other._tags ) {
         }
 
         Shard( const Shard* other )
             : _name( other->_name ) , _addr( other->_addr ), _cs( other->_cs ) , 
-              _maxSize( other->_maxSize ) , _isDraining( other->_isDraining ) , _rs( other->_rs ) {
+              _maxSize( other->_maxSize ) , _isDraining( other->_isDraining ) {
         }
 
         static Shard make( const string& ident ) {
@@ -127,10 +127,11 @@ namespace mongo {
 
         bool ok() const { return _addr.size() > 0; }
 
-        BSONObj runCommand( const string& db , const string& simple ) const {
-            return runCommand( db , BSON( simple << 1 ) );
+        // Set internal to true to run the command with internal authentication privileges.
+        BSONObj runCommand( const string& db , const string& simple , bool internal = false ) const {
+            return runCommand( db , BSON( simple << 1 ) , internal );
         }
-        BSONObj runCommand( const string& db , const BSONObj& cmd ) const ;
+        BSONObj runCommand( const string& db , const BSONObj& cmd , bool internal = false) const ;
 
         ShardStatus getStatus() const ;
         
@@ -140,6 +141,9 @@ namespace mongo {
          * of if the replica set contains node
          */
         bool containsNode( const string& node ) const;
+
+        const set<string>& tags() const { return _tags; }
+        void addTag( const string& tag ) { _tags.insert( tag ); }
 
         static void getAllShards( vector<Shard>& all );
         static void printShardInfo( ostream& out );
@@ -160,8 +164,7 @@ namespace mongo {
         static Shard EMPTY;
         
     private:
-        
-	void _rsInit();
+
         void _setAddr( const string& addr );
         
         string    _name;
@@ -169,7 +172,7 @@ namespace mongo {
         ConnectionString _cs;
         long long _maxSize;    // in MBytes, 0 is unlimited
         bool      _isDraining; // shard is currently being removed
-        ReplicaSetMonitorPtr _rs;
+        set<string> _tags;
     };
 
     class ShardStatus {

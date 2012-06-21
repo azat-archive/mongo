@@ -19,6 +19,7 @@
 #include "pch.h"
 #include "listen.h"
 #include "message_port.h"
+#include "mongo/platform/atomic_word.h"
 
 #ifndef _WIN32
 
@@ -238,7 +239,7 @@ namespace mongo {
         _logListen( _port , false );
 #endif
 
-        static long connNumber = 0;
+        static AtomicInt64 connNumber;
         struct timeval maxSelectTime;
         while ( ! inShutdown() ) {
             fd_set fds[1];
@@ -314,10 +315,12 @@ namespace mongo {
                 setsockopt( s , SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(int));
 #endif
 
+                long long myConnectionNumber = connNumber.addAndFetch(1);
+
                 if ( _logConnect && ! cmdLine.quiet ){
                     int conns = connTicketHolder.used()+1;
                     const char* word = (conns == 1 ? " connection" : " connections");
-                    log() << "connection accepted from " << from.toString() << " #" << ++connNumber << " (" << conns << word << " now open)" << endl;
+                    log() << "connection accepted from " << from.toString() << " #" << myConnectionNumber << " (" << conns << word << " now open)" << endl;
                 }
                 
                 boost::shared_ptr<Socket> pnewSock( new Socket(s, from) );
@@ -326,7 +329,7 @@ namespace mongo {
                     pnewSock->secureAccepted( _ssl );
                 }
 #endif
-                accepted( pnewSock );
+                accepted( pnewSock , myConnectionNumber );
             }
         }
     }
@@ -336,8 +339,10 @@ namespace mongo {
     }
 
 
-    void Listener::accepted(boost::shared_ptr<Socket> psocket) {
-        acceptedMP( new MessagingPort(psocket) );
+    void Listener::accepted(boost::shared_ptr<Socket> psocket, long long connectionId ) {
+        MessagingPort* port = new MessagingPort(psocket);
+        port->setConnectionId( connectionId );
+        acceptedMP( port );
     }
     
     void Listener::acceptedMP(MessagingPort *mp) {

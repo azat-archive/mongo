@@ -52,17 +52,15 @@ namespace mongo {
             ChunkManagerPtr cm = cfg->getChunkManager( chunkInfo.ns );
             verify( cm );
 
-            const BSONObj& chunkToMove = chunkInfo.chunk;
-            ChunkPtr c = cm->findChunk( chunkToMove["min"].Obj() );
-            if ( c->getMin().woCompare( chunkToMove["min"].Obj() ) || c->getMax().woCompare( chunkToMove["max"].Obj() ) ) {
+            ChunkPtr c = cm->findChunk( chunkInfo.chunk.min );
+            if ( c->getMin().woCompare( chunkInfo.chunk.min ) || c->getMax().woCompare( chunkInfo.chunk.max ) ) {
                 // likely a split happened somewhere
                 cm = cfg->getChunkManager( chunkInfo.ns , true /* reload */);
                 verify( cm );
 
-                c = cm->findChunk( chunkToMove["min"].Obj() );
-                if ( c->getMin().woCompare( chunkToMove["min"].Obj() ) || c->getMax().woCompare( chunkToMove["max"].Obj() ) ) {
-                    log() << "chunk mismatch after reload, ignoring will retry issue cm: "
-                          << c->getMin() << " min: " << chunkToMove["min"].Obj() << endl;
+                c = cm->findChunk( chunkInfo.chunk.min );
+                if ( c->getMin().woCompare( chunkInfo.chunk.min ) || c->getMax().woCompare( chunkInfo.chunk.max ) ) {
+                    log() << "chunk mismatch after reload, ignoring will retry issue " << chunkInfo.chunk.toString() << endl;
                     continue;
                 }
             }
@@ -75,13 +73,13 @@ namespace mongo {
 
             // the move requires acquiring the collection metadata's lock, which can fail
             log() << "balancer move failed: " << res << " from: " << chunkInfo.from << " to: " << chunkInfo.to
-                  << " chunk: " << chunkToMove << endl;
+                  << " chunk: " << chunkInfo.chunk << endl;
 
             if ( res["chunkTooBig"].trueValue() ) {
                 // reload just to be safe
                 cm = cfg->getChunkManager( chunkInfo.ns );
                 verify( cm );
-                c = cm->findChunk( chunkToMove["min"].Obj() );
+                c = cm->findChunk( chunkInfo.chunk.min );
                 
                 log() << "forcing a split because migrate failed for size reasons" << endl;
                 
@@ -123,7 +121,7 @@ namespace mongo {
 
         for ( vector<Shard>::iterator i=all.begin(); i!=all.end(); ++i ) {
             Shard s = *i;
-            BSONObj f = s.runCommand( "admin" , "features" );
+            BSONObj f = s.runCommand( "admin" , "features" , true );
             if ( f["oidMachine"].isNumber() ) {
                 int x = f["oidMachine"].numberInt();
                 if ( oids.count(x) == 0 ) {
@@ -131,8 +129,8 @@ namespace mongo {
                 }
                 else {
                     log() << "error: 2 machines have " << x << " as oid machine piece " << s.toString() << " and " << oids[x].toString() << endl;
-                    s.runCommand( "admin" , BSON( "features" << 1 << "oidReset" << 1 ) );
-                    oids[x].runCommand( "admin" , BSON( "features" << 1 << "oidReset" << 1 ) );
+                    s.runCommand( "admin" , BSON( "features" << 1 << "oidReset" << 1 ) , true );
+                    oids[x].runCommand( "admin" , BSON( "features" << 1 << "oidReset" << 1 ) , true );
                     return false;
                 }
             }
@@ -186,19 +184,17 @@ namespace mongo {
             LOG(1) << "can't balance without more active shards" << endl;
             return;
         }
-
-        map< string, BSONObj > shardLimitsMap;
+        
+        ShardInfoMap shardInfo;
         for ( vector<Shard>::const_iterator it = allShards.begin(); it != allShards.end(); ++it ) {
             const Shard& s = *it;
             ShardStatus status = s.getStatus();
-
-            BSONObj limitsObj = BSON( ShardFields::maxSize( s.getMaxSize() ) <<
-                                      LimitsFields::currSize( status.mapped() ) <<
-                                      ShardFields::draining( s.isDraining() )  <<
-                                      LimitsFields::hasOpsQueued( status.hasOpsQueued() )
-                                    );
-
-            shardLimitsMap[ s.getName() ] = limitsObj;
+            shardInfo[ s.getName() ] = ShardInfo( s.getMaxSize(),
+                                                  status.mapped(),
+                                                  s.isDraining(),
+                                                  status.hasOpsQueued(),
+                                                  s.tags()
+                                                  );
         }
 
         //
@@ -223,14 +219,29 @@ namespace mongo {
                 LOG(1) << "skipping empty collection (" << ns << ")";
                 continue;
             }
-
+            
             for ( vector<Shard>::iterator i=allShards.begin(); i!=allShards.end(); ++i ) {
                 // this just makes sure there is an entry in shardToChunksMap for every shard
                 Shard s = *i;
                 shardToChunksMap[s.getName()].size();
             }
 
-            CandidateChunk* p = _policy->balance( ns , shardLimitsMap , shardToChunksMap , _balancedLastTime );
+            DistributionStatus status( shardInfo, shardToChunksMap );
+            
+            // load tags
+            conn.ensureIndex( ShardNS::tags, BSON( "ns" << 1 << "min" << 1 ), true );
+            cursor = conn.query( ShardNS::tags , QUERY( "ns" << ns ).sort( "min" ) );
+            while ( cursor->more() ) {
+                BSONObj tag = cursor->nextSafe();
+                uassert( 16356 , str::stream() << "tag ranges not valid for: " << ns ,
+                         status.addTagRange( TagRange( tag["min"].Obj().getOwned(), 
+                                                       tag["max"].Obj().getOwned(), 
+                                                       tag["tag"].String() ) ) );
+                    
+            }
+            cursor.reset();
+            
+            CandidateChunk* p = _policy->balance( ns, status, _balancedLastTime );
             if ( p ) candidateChunks->push_back( CandidateChunkPtr( p ) );
         }
     }
@@ -280,6 +291,8 @@ namespace mongo {
             break;
         }
 
+        int sleepTime = 30;
+
         // getConnectioString and dist lock constructor does not throw, which is what we expect on while
         // on the balancer thread
         ConnectionString config = configServer.getConnectionString();
@@ -288,9 +301,9 @@ namespace mongo {
         while ( ! inShutdown() ) {
 
             try {
-                
+
                 scoped_ptr<ScopedDbConnection> connPtr(
-                        ScopedDbConnection::getScopedDbConnection( config.toString() ) );
+                        ScopedDbConnection::getInternalScopedDbConnection( config.toString() ) );
                 ScopedDbConnection& conn = *connPtr;
 
                 // ping has to be first so we keep things in the config server in sync
@@ -302,8 +315,9 @@ namespace mongo {
                 // refresh chunk size (even though another balancer might be active)
                 Chunk::refreshChunkSize();
 
+                BSONObj balancerConfig;
                 // now make sure we should even be running
-                if ( ! grid.shouldBalance() ) {
+                if ( ! grid.shouldBalance( "", &balancerConfig ) ) {
                     LOG(1) << "skipping balancing round because balancing is disabled" << endl;
 
                     // Ping again so scripts can determine if we're active without waiting
@@ -311,9 +325,11 @@ namespace mongo {
 
                     conn.done();
                     
-                    sleepsecs( 30 );
+                    sleepsecs( sleepTime );
                     continue;
                 }
+
+                sleepTime = balancerConfig["_nosleep"].trueValue() ? 30 : 6;
                 
                 uassert( 13258 , "oids broken after resetting!" , _checkOIDs() );
 
@@ -327,7 +343,7 @@ namespace mongo {
 
                         conn.done();
                         
-                        sleepsecs( 30 ); // no need to wake up soon
+                        sleepsecs( sleepTime ); // no need to wake up soon
                         continue;
                     }
                     
@@ -351,7 +367,7 @@ namespace mongo {
                 
                 conn.done();
 
-                sleepsecs( _balancedLastTime ? 5 : 10 );
+                sleepsecs( _balancedLastTime ? sleepTime / 6 : sleepTime );
             }
             catch ( std::exception& e ) {
                 log() << "caught exception while doing balance: " << e.what() << endl;
@@ -359,7 +375,7 @@ namespace mongo {
                 // Just to match the opening statement if in log level 1
                 LOG(1) << "*** End of balancing round" << endl;
 
-                sleepsecs( 30 ); // sleep a fair amount b/c of error
+                sleepsecs( sleepTime ); // sleep a fair amount b/c of error
                 continue;
             }
         }

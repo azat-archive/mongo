@@ -43,6 +43,8 @@ namespace mongo {
     public:
 
         using DBClientBase::query;
+        using DBClientBase::update;
+        using DBClientBase::remove;
 
         /**
          * @param commaSeparated should be 3 hosts comma separated
@@ -75,9 +77,9 @@ namespace mongo {
 
         virtual void insert( const string &ns, const vector< BSONObj >& v, int flags=0);
 
-        virtual void remove( const string &ns , Query query, bool justOne );
+        virtual void remove( const string &ns , Query query, int flags );
 
-        virtual void update( const string &ns , Query query , BSONObj obj , bool upsert , bool multi );
+        virtual void update( const string &ns , Query query , BSONObj obj , int flags );
 
         virtual bool call( Message &toSend, Message &response, bool assertOk , string * actualServer );
         virtual void say( Message &toSend, bool isRetry = false , string * actualServer = 0 );
@@ -99,6 +101,9 @@ namespace mongo {
         double getSoTimeout() const { return _socketTimeout; }
 
         virtual bool auth(const string &dbname, const string &username, const string &password_text, string& errmsg, bool digestPassword, Auth::Level* level=NULL);
+
+        virtual void setAuthenticationTable( const AuthenticationTable& auth );
+        virtual void clearAuthenticationTable();
 
         virtual bool lazySupported() const { return false; }
     private:

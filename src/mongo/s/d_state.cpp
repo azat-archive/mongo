@@ -155,6 +155,8 @@ namespace mongo {
         version = ( p->getNumChunks() > 1 ) ? version : ShardChunkVersion( 0 , OID() );
 
         ShardChunkManagerPtr cloned( p->cloneMinus( min , max , version ) );
+        // TODO: a bit dangerous to have two different zero-version states - no-manager and
+        // no-version
         _chunks[ns] = cloned;
     }
 
@@ -214,9 +216,17 @@ namespace mongo {
         {
             scoped_lock lk( _mutex );
             ChunkManagersMap::const_iterator it = _chunks.find( ns );
-            if ( it != _chunks.end() ) currManager = it->second;
-            if ( it != _chunks.end() && ( storedVersion = it->second->getVersion() ).isEquivalentTo( version ) )
-                return true;
+            if( it == _chunks.end() ){
+
+                // TODO: We need better semantic distinction between *no manager found* and
+                // *manager of version zero found*
+                log() << "no current chunk manager found for this shard, will initialize" << endl;
+            }
+            else{
+                currManager = it->second;
+                if( ( storedVersion = it->second->getVersion() ).isEquivalentTo( version ) )
+                    return true;
+            }
         }
         
         LOG( 2 ) << "verifying cached version " << storedVersion.toString() << " and new version " << version.toString() << " for '" << ns << "'" << endl;
@@ -552,10 +562,12 @@ namespace mongo {
                 // this means there is no reset going on an either side
                 // so its safe to make some assumptions
 
-                if ( version.isEquivalentTo( globalVersion ) ) {
+                if ( version.isWriteCompatibleWith( globalVersion ) ) {
                     // mongos and mongod agree!
-                    if ( ! oldVersion.isEquivalentTo( version ) ) {
-                        if ( oldVersion < globalVersion ) {
+                    if ( ! oldVersion.isWriteCompatibleWith( version ) ) {
+                        if ( oldVersion < globalVersion &&
+                             oldVersion.hasCompatibleEpoch(globalVersion) )
+                        {
                             info->setVersion( ns , version );
                         }
                         else if ( authoritative ) {

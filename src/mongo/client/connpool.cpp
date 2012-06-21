@@ -22,12 +22,17 @@
 #include "connpool.h"
 #include "syncclusterconnection.h"
 #include "../s/shard.h"
+#include "mongo/client/dbclient_rs.h"
 
 namespace mongo {
 
     // ------ PoolForHost ------
 
     PoolForHost::~PoolForHost() {
+        clear();
+    }
+
+    void PoolForHost::clear() {
         while ( ! _pool.empty() ) {
             StoredConnection sc = _pool.top();
             delete sc.conn;
@@ -75,7 +80,11 @@ namespace mongo {
             _pool.pop();
             all.push_back( c );
             bool res;
+            // When a connection is in the pool it doesn't have an AuthenticationTable set.
+            c.conn->setAuthenticationTable(
+                    AuthenticationTable::getInternalSecurityAuthenticationTable() );
             c.conn->isMaster( res );
+            c.conn->clearAuthenticationTable();
         }
 
         for ( vector<StoredConnection>::iterator i=all.begin(); i != all.end(); ++i ) {
@@ -220,6 +229,18 @@ namespace mongo {
         for ( PoolMap::iterator i = _pools.begin(); i != _pools.end(); i++ ) {
             PoolForHost& p = i->second;
             p.flush();
+        }
+    }
+
+    void DBConnectionPool::removeHost( const string& host ) {
+        scoped_lock L(_mutex);
+        LOG(2) << "Removing connections from all pools for host: " << host << endl;
+        for ( PoolMap::iterator i = _pools.begin(); i != _pools.end(); ++i ) {
+            const string& poolHost = i->first.ident;
+            if ( !serverNameCompare()(host, poolHost) && !serverNameCompare()(poolHost, host) ) {
+                // hosts are the same
+                i->second.clear();
+            }
         }
     }
 

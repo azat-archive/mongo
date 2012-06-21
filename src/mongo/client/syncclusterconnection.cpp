@@ -21,6 +21,7 @@
 #include "mongo/client/syncclusterconnection.h"
 
 #include "mongo/client/dbclientcursor.h"
+#include "mongo/client/dbclientinterface.h"
 #include "mongo/db/dbmessage.h"
 
 // error codes 8000-8009
@@ -210,6 +211,20 @@ namespace mongo {
         return true;
     }
 
+    void SyncClusterConnection::setAuthenticationTable( const AuthenticationTable& auth ) {
+        for( size_t i = 0; i < _conns.size(); ++i ) {
+            _conns[i]->setAuthenticationTable( auth );
+        }
+        DBClientWithCommands::setAuthenticationTable( auth );
+    }
+
+    void SyncClusterConnection::clearAuthenticationTable() {
+        for( size_t i = 0; i < _conns.size(); ++i ) {
+            _conns[i]->clearAuthenticationTable();
+        }
+        DBClientWithCommands::clearAuthenticationTable();
+    }
+
     auto_ptr<DBClientCursor> SyncClusterConnection::query(const string &ns, Query query, int nToReturn, int nToSkip,
             const BSONObj *fieldsToReturn, int queryOptions, int batchSize ) {
         _lastErrors.clear();
@@ -223,7 +238,11 @@ namespace mongo {
     }
 
     bool SyncClusterConnection::_commandOnActive(const string &dbname, const BSONObj& cmd, BSONObj &info, int options ) {
-        auto_ptr<DBClientCursor> cursor = _queryOnActive( dbname + ".$cmd" , cmd , 1 , 0 , 0 , options , 0 );
+        BSONObj actualCmd = cmd;
+        if ( hasAuthenticationTable() ) {
+            actualCmd = getAuthenticationTable().copyCommandObjAddingAuth( cmd );
+        }
+        auto_ptr<DBClientCursor> cursor = _queryOnActive( dbname + ".$cmd" , actualCmd , 1 , 0 , 0 , options , 0 );
         if ( cursor->more() )
             info = cursor->next().copy();
         else
@@ -278,21 +297,21 @@ namespace mongo {
         uassert( 10023 , "SyncClusterConnection bulk insert not implemented" , 0);
     }
 
-    void SyncClusterConnection::remove( const string &ns , Query query, bool justOne ) {
+    void SyncClusterConnection::remove( const string &ns , Query query, int flags ) {
         string errmsg;
         if ( ! prepare( errmsg ) )
             throw UserException( 8020 , (string)"SyncClusterConnection::remove prepare failed: " + errmsg );
 
         for ( size_t i=0; i<_conns.size(); i++ ) {
-            _conns[i]->remove( ns , query , justOne );
+            _conns[i]->remove( ns , query , flags );
         }
 
         _checkLast();
     }
 
-    void SyncClusterConnection::update( const string &ns , Query query , BSONObj obj , bool upsert , bool multi ) {
+    void SyncClusterConnection::update( const string &ns , Query query , BSONObj obj , int flags ) {
 
-        if ( upsert ) {
+        if ( flags & UpdateOption_Upsert ) {
             uassert( 13120 , "SyncClusterConnection::update upsert query needs _id" , query.obj["_id"].type() );
         }
 
@@ -304,7 +323,7 @@ namespace mongo {
 
         for ( size_t i = 0; i < _conns.size(); i++ ) {
             try {
-                _conns[i]->update( ns , query , obj , upsert , multi );
+                _conns[i]->update( ns , query , obj , flags );
             }
             catch ( std::exception& e ) {
                 if ( _writeConcern )

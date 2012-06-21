@@ -639,7 +639,7 @@ namespace QueryOptimizerTests {
             }
         };
         
-        namespace QueryFiniteSetOrderSuffix {
+        namespace QueryBoundsExactOrderSuffix {
             
             class Base : public QueryPlanTests::Base {
             public:
@@ -651,10 +651,11 @@ namespace QueryOptimizerTests {
                                                                 FRSP( planQuery ),
                                                                 FRSP2( planQuery ), planQuery,
                                                                 planOrder ) );
-                    ASSERT_EQUALS( queryFiniteSetOrderSuffix(), plan->queryFiniteSetOrderSuffix() );
+                    ASSERT_EQUALS( queryBoundsExactOrderSuffix(),
+                                   plan->queryBoundsExactOrderSuffix() );
                 }
             protected:
-                virtual bool queryFiniteSetOrderSuffix() = 0;
+                virtual bool queryBoundsExactOrderSuffix() = 0;
                 virtual int indexIdx() { return indexno( index() ); }
                 virtual BSONObj index() = 0;
                 virtual BSONObj query() = 0;
@@ -662,11 +663,11 @@ namespace QueryOptimizerTests {
             };
             
             class True : public Base {
-                bool queryFiniteSetOrderSuffix() { return true; }
+                bool queryBoundsExactOrderSuffix() { return true; }
             };
             
             class False : public Base {
-                bool queryFiniteSetOrderSuffix() { return false; }
+                bool queryBoundsExactOrderSuffix() { return false; }
             };
             
             class Unindexed : public False {
@@ -675,11 +676,23 @@ namespace QueryOptimizerTests {
                 BSONObj query() { return BSON( "a" << 1 ); }
                 BSONObj order() { return BSON( "b" << 1 ); }
             };
-            
-            class RangeQuery : public False {
+
+            class RangeSort : public True {
+                BSONObj index() { return BSON( "a" << 1 ); }
+                BSONObj query() { return BSON( "a" << GT << 1 ); }
+                BSONObj order() { return BSON( "a" << 1 ); }                
+            };
+
+            class RangeBeforeSort : public False {
                 BSONObj index() { return BSON( "a" << 1 << "b" << 1 ); }
                 BSONObj query() { return BSON( "a" << GT << 1 ); }
                 BSONObj order() { return BSON( "b" << 1 ); }                
+            };
+
+            class EqualityRangeBeforeSort : public False {
+                BSONObj index() { return BSON( "a" << 1 << "b" << 1 << "c" << 1 ); }
+                BSONObj query() { return BSON( "a" << 1 << "b" << GT << 1 ); }
+                BSONObj order() { return BSON( "c" << 1 ); }                
             };
 
             class EqualSort : public True {
@@ -747,8 +760,62 @@ namespace QueryOptimizerTests {
                 BSONObj query() { return fromjson( "{a:4,'':{$in:[0,1]}}" ); }
                 BSONObj order() { return BSONObj(); }                
             };
+
+            class SortedRange : public True {
+                BSONObj index() { return BSON( "a" << 1 << "b" << 1 ); }
+                BSONObj query() { return fromjson( "{a:{$in:[0,1]},b:{$gt:5}}" ); }
+                BSONObj order() { return BSON( "b" << 1 ); }
+            };
             
-        } // namespace QueryFiniteSetOrderSuffix
+            class SortedRangeWrongDirection : public False {
+                BSONObj index() { return BSON( "a" << 1 << "b" << 1 ); }
+                BSONObj query() { return fromjson( "{a:{$in:[0,1]},b:{$gt:5}}" ); }
+                BSONObj order() { return BSON( "b" << -1 ); }
+            };
+            
+            class SortedDoubleRange : public True {
+                BSONObj index() { return BSON( "a" << 1 << "b" << 1 ); }
+                BSONObj query() { return fromjson( "{a:{$in:[0,1]},b:{$gt:5,$lt:10}}" ); }
+                BSONObj order() { return BSON( "b" << 1 ); }
+            };
+
+            class RangeSortPrefix : public True {
+                BSONObj index() { return BSON( "a" << 1 << "b" << 1 << "c" << 1 ); }
+                BSONObj query() { return fromjson( "{a:{$in:[0,1]},b:{$gt:5}}" ); }
+                BSONObj order() { return BSON( "b" << 1 << "c" << 1 ); }
+            };
+            
+            class RangeSortInfix : public True {
+                BSONObj index() { return BSON( "a" << 1 << "b" << 1 << "c" << 1 ); }
+                BSONObj query() { return fromjson( "{a:{$in:[0,1]},b:{$gt:5}}" ); }
+                BSONObj order() { return BSON( "a" << 1 << "b" << 1 << "c" << 1 ); }
+            };
+            
+            class RangeEquality : public False {
+                BSONObj index() { return BSON( "a" << 1 << "b" << 1 << "c" << 1 ); }
+                BSONObj query() { return fromjson( "{a:{$in:[0,1]},b:{$gt:5},c:2}" ); }
+                BSONObj order() { return BSON( "b" << 1 << "c" << 1 ); }
+            };
+
+            class RangeRange : public False {
+                BSONObj index() { return BSON( "a" << 1 << "b" << 1 << "c" << 1 ); }
+                BSONObj query() { return fromjson( "{a:{$in:[0,1]},b:{$gt:5},c:{$gt:2}}" ); }
+                BSONObj order() { return BSON( "b" << 1 << "c" << 1 ); }
+            };
+            
+            class Unsatisfiable : public False {
+                BSONObj index() { return BSON( "a" << 1 ); }
+                BSONObj query() { return fromjson( "{a:{$gt:0,$lt:0}}" ); }
+                BSONObj order() { return BSON( "a" << 1 ); }
+            };
+
+            class EqualityUnsatisfiable : public False {
+                BSONObj index() { return BSON( "a" << 1 << "b" << 1 ); }
+                BSONObj query() { return fromjson( "{a:{$in:[0,1]},b:{$gt:0,$lt:0}}" ); }
+                BSONObj order() { return BSON( "b" << 1 ); }
+            };
+
+        } // namespace QueryBoundsExactOrderSuffix
 
         /** Checks related to 'special' QueryPlans. */
         class Special : public Base {
@@ -798,7 +865,7 @@ namespace QueryOptimizerTests {
                 toSend.setData(dbQuery, b.buf(), b.len());
             }
             QueryPattern makePattern( const BSONObj &query, const BSONObj &order ) {
-                FieldRangeSet frs( ns(), query, true );
+                FieldRangeSet frs( ns(), query, true, true );
                 return QueryPattern( frs, order );
             }
             shared_ptr<QueryPlanSet> makeQps( const BSONObj& query = BSONObj(),
@@ -848,7 +915,7 @@ namespace QueryOptimizerTests {
                 ASSERT_EQUALS( 1, makeQps( query )->nPlans() );
 
                 // The optimal plan is recorded in the plan cache.
-                FieldRangeSet frs( ns(), query, true );
+                FieldRangeSet frs( ns(), query, true, true );
                 CachedQueryPlan cachedPlan =
                         NamespaceDetailsTransient::get( ns() ).cachedQueryPlanForPattern
                             ( QueryPattern( frs, BSONObj() ) );
@@ -931,22 +998,23 @@ namespace QueryOptimizerTests {
                 Helpers::ensureIndex( ns(), BSON( "a" << 1 ), false, "a_1" );
                 Helpers::ensureIndex( ns(), BSON( "b" << 1 ), false, "b_1" );
                 string err;
-                ASSERT_EQUALS( 0, runCount( ns(), BSON( "query" << BSON( "a" << 4 ) ), err ) );
+                int errCode;
+                ASSERT_EQUALS( 0, runCount( ns(), BSON( "query" << BSON( "a" << 4 ) ), err, errCode ) );
                 BSONObj one = BSON( "a" << 1 );
                 BSONObj fourA = BSON( "a" << 4 );
                 BSONObj fourB = BSON( "a" << 4 );
                 theDataFileMgr.insertWithObjMod( ns(), one );
-                ASSERT_EQUALS( 0, runCount( ns(), BSON( "query" << BSON( "a" << 4 ) ), err ) );
+                ASSERT_EQUALS( 0, runCount( ns(), BSON( "query" << BSON( "a" << 4 ) ), err, errCode ) );
                 theDataFileMgr.insertWithObjMod( ns(), fourA );
-                ASSERT_EQUALS( 1, runCount( ns(), BSON( "query" << BSON( "a" << 4 ) ), err ) );
+                ASSERT_EQUALS( 1, runCount( ns(), BSON( "query" << BSON( "a" << 4 ) ), err, errCode ) );
                 theDataFileMgr.insertWithObjMod( ns(), fourB );
-                ASSERT_EQUALS( 2, runCount( ns(), BSON( "query" << BSON( "a" << 4 ) ), err ) );
-                ASSERT_EQUALS( 3, runCount( ns(), BSON( "query" << BSONObj() ), err ) );
-                ASSERT_EQUALS( 3, runCount( ns(), BSON( "query" << BSON( "a" << GT << 0 ) ), err ) );
+                ASSERT_EQUALS( 2, runCount( ns(), BSON( "query" << BSON( "a" << 4 ) ), err, errCode ) );
+                ASSERT_EQUALS( 3, runCount( ns(), BSON( "query" << BSONObj() ), err, errCode ) );
+                ASSERT_EQUALS( 3, runCount( ns(), BSON( "query" << BSON( "a" << GT << 0 ) ), err, errCode ) );
                 // missing ns
-                ASSERT_EQUALS( -1, runCount( "unittests.missingNS", BSONObj(), err ) );
+                ASSERT_EQUALS( -1, runCount( "unittests.missingNS", BSONObj(), err, errCode ) );
                 // impossible match
-                ASSERT_EQUALS( 0, runCount( ns(), BSON( "query" << BSON( "a" << GT << 0 << LT << -1 ) ), err ) );
+                ASSERT_EQUALS( 0, runCount( ns(), BSON( "query" << BSON( "a" << GT << 0 << LT << -1 ) ), err, errCode ) );
             }
         };
 
@@ -1004,7 +1072,7 @@ namespace QueryOptimizerTests {
                 deleteObjects( ns(), delSpec, false );
                 
                 NamespaceDetailsTransient &nsdt = NamespaceDetailsTransient::get( ns() );
-                QueryPattern queryPattern = FieldRangeSet( ns(), delSpec, true ).pattern();
+                QueryPattern queryPattern = FieldRangeSet( ns(), delSpec, true, true ).pattern();
                 CachedQueryPlan cachedQueryPlan = nsdt.cachedQueryPlanForPattern( queryPattern ); 
                 ASSERT_EQUALS( BSON( "a" << 1 ), cachedQueryPlan.indexKey() );
                 ASSERT_EQUALS( 1, cachedQueryPlan.nScanned() );
@@ -1344,7 +1412,7 @@ namespace QueryOptimizerTests {
         static const char *ns() { return "unittests.QueryOptimizerTests"; }
         static NamespaceDetails *nsd() { return nsdetails( ns() ); }
         QueryPattern makePattern( const BSONObj &query, const BSONObj &order ) {
-            FieldRangeSet frs( ns(), query, true );
+            FieldRangeSet frs( ns(), query, true, true );
             return QueryPattern( frs, order );
         }
         shared_ptr<MultiPlanScanner> makeMps( const BSONObj &query, const BSONObj &order ) {
@@ -1501,7 +1569,7 @@ namespace QueryOptimizerTests {
                                                          BSON( "b" << 1 ) );
             ASSERT_EQUALS( string( "b" ), c->indexKeyPattern().firstElementFieldName() );
 
-            FieldRangeSet frs( "ns", BSON( "a" << 1 ), true );
+            FieldRangeSet frs( "ns", BSON( "a" << 1 ), true, true );
             {
                 SimpleMutex::scoped_lock lk(NamespaceDetailsTransient::_qcMutex);
                 NamespaceDetailsTransient::get_inlock( ns() ).
@@ -1540,19 +1608,30 @@ namespace QueryOptimizerTests {
             add<QueryPlanTests::Unhelpful>();
             add<QueryPlanTests::KeyFieldsOnly>();
             add<QueryPlanTests::SparseExistsFalse>();
-            add<QueryPlanTests::QueryFiniteSetOrderSuffix::Unindexed>();
-            add<QueryPlanTests::QueryFiniteSetOrderSuffix::RangeQuery>();
-            add<QueryPlanTests::QueryFiniteSetOrderSuffix::EqualSort>();
-            add<QueryPlanTests::QueryFiniteSetOrderSuffix::InSort>();
-            add<QueryPlanTests::QueryFiniteSetOrderSuffix::EqualInSort>();
-            add<QueryPlanTests::QueryFiniteSetOrderSuffix::InInSort>();
-            add<QueryPlanTests::QueryFiniteSetOrderSuffix::NonCoveredRange>();
-            add<QueryPlanTests::QueryFiniteSetOrderSuffix::QuerySortOverlap>();
-            add<QueryPlanTests::QueryFiniteSetOrderSuffix::OrderDirection>();
-            add<QueryPlanTests::QueryFiniteSetOrderSuffix::InterveningIndexField>();
-            add<QueryPlanTests::QueryFiniteSetOrderSuffix::TailingIndexField>();
-            add<QueryPlanTests::QueryFiniteSetOrderSuffix::EmptySort>();
-            add<QueryPlanTests::QueryFiniteSetOrderSuffix::EmptyStringField>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::Unindexed>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::RangeSort>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::RangeBeforeSort>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::EqualityRangeBeforeSort>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::EqualSort>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::InSort>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::EqualInSort>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::InInSort>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::NonCoveredRange>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::QuerySortOverlap>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::OrderDirection>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::InterveningIndexField>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::TailingIndexField>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::EmptySort>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::EmptyStringField>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::SortedRange>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::SortedRangeWrongDirection>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::SortedDoubleRange>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::RangeSortPrefix>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::RangeSortInfix>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::RangeEquality>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::RangeRange>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::Unsatisfiable>();
+            add<QueryPlanTests::QueryBoundsExactOrderSuffix::EqualityUnsatisfiable>();
             add<QueryPlanTests::Special>();
             add<QueryPlanSetTests::ToString>();
             add<QueryPlanSetTests::NoIndexes>();

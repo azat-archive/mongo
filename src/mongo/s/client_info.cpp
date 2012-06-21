@@ -51,19 +51,19 @@ namespace mongo {
         _sinceLastGetError.insert( shard );
     }
 
-    void ClientInfo::newRequest( AbstractMessagingPort* p ) {
-
-        if ( p ) {
-            HostAndPort r = p->remote();
-            if ( ! _remote.hasPort() )
-                _remote = r;
-            else if ( _remote != r ) {
-                stringstream ss;
-                ss << "remotes don't match old [" << _remote.toString() << "] new [" << r.toString() << "]";
-                throw UserException( 13134 , ss.str() );
-            }
+    void ClientInfo::newPeerRequest( const HostAndPort& peer ) {
+        if ( ! _remote.hasPort() )
+            _remote = peer;
+        else if ( _remote != peer ) {
+            stringstream ss;
+            ss << "remotes don't match old [" << _remote.toString() << "] new [" << peer.toString() << "]";
+            throw UserException( 13134 , ss.str() );
         }
 
+        newRequest();
+    }
+
+    void ClientInfo::newRequest() {
         _lastAccess = (int) time(0);
 
         set<string> * temp = _cur;
@@ -136,7 +136,8 @@ namespace mongo {
         _prev = temp;
     }
 
-    bool ClientInfo::getLastError( const BSONObj& options , BSONObjBuilder& result , bool fromWriteBackListener ) {
+    bool ClientInfo::getLastError( const string& dbName, const BSONObj& options ,
+                                   BSONObjBuilder& result , bool fromWriteBackListener ) {
         set<string> * shards = getPrev();
 
         if ( shards->size() == 0 ) {
@@ -157,7 +158,7 @@ namespace mongo {
             {
                 ShardConnection conn( theShard , "" );
                 try {
-                    ok = conn->runCommand( "admin" , options , res );
+                    ok = conn->runCommand( dbName , options , res );
                 }
                 catch( std::exception &e ) {
 
@@ -241,7 +242,7 @@ namespace mongo {
             bool ok = false;
             try {
                 conn.reset( new ShardConnection( theShard , "" ) ); // constructor can throw if shard is down
-                ok = (*conn)->runCommand( "admin" , options , res );
+                ok = (*conn)->runCommand( dbName , options , res );
                 shardRawGLE.append( theShard , res );
             }
             catch( std::exception &e ){
