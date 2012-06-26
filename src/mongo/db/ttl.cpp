@@ -60,7 +60,10 @@ namespace mongo {
                 
 
                 BSONObj key = idx["key"].Obj();
-                uassert( 16230 , "key for ttl index can only have 1 field" , key.nFields() == 1 );
+                if ( key.nFields() != 1 ) {
+                    error() << "key for ttl index can only have 1 field" << endl;
+                    continue;
+                }
 
                 BSONObj query;
                 {
@@ -76,6 +79,10 @@ namespace mongo {
                     string ns = idx["ns"].String();
                     Client::WriteContext ctx( ns );
                     NamespaceDetails* nsd = nsdetails( ns.c_str() );
+                    if ( ! nsd ) {
+                        // collection was dropped
+                        continue;
+                    }
                     if ( nsd->setUserFlag( NamespaceDetails::Flag_UsePowerOf2Sizes ) ) {
                         nsd->syncUserFlags( ns );
                     }
@@ -111,7 +118,12 @@ namespace mongo {
                 
                 for ( set<string>::const_iterator i=dbs.begin(); i!=dbs.end(); ++i ) {
                     string db = *i;
-                    doTTLForDB( db );
+                    try {
+                        doTTLForDB( db );
+                    }
+                    catch ( DBException& e ) {
+                        error() << "error processing ttl for db: " << db << " " << e << endl;
+                    }
                 }
 
             }

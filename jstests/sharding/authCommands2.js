@@ -44,7 +44,7 @@ st.adminCommand( { enablesharding : "test" } );
 st.adminCommand( { shardcollection : "test.foo" , key : { i : 1, j : 1 } } );
 
 var str = 'a';
-while ( str.length < 1024 * 16 ) {
+while ( str.length < 8000 ) {
     str += str;
 }
 for ( var i = 0; i < 100; i++ ) {
@@ -99,7 +99,8 @@ var checkReadOps = function( hasReadAuth ) {
                                                   out : {inline : 1}});
         assert.eq( 100, res.results.length );
         assert.eq( 45, res.results[0].value );
-
+        res = checkCommandSucceeded( testDB, { $eval : 'return db.bar.findOne();'} );
+        assert.eq(str, res.retval.str);
     } else {
         print( "Checking read operations, should fail" );
         assert.throws( function() { testDB.foo.find().itcount(); } );
@@ -108,6 +109,7 @@ var checkReadOps = function( hasReadAuth ) {
         checkCommandFailed( testDB, {collstats : 'foo'} );
         checkCommandFailed( testDB, {mapreduce : 'foo', map : map, reduce : reduce,
                                      out : { inline : 1 }} );
+        checkCommandFailed( testDB, { $eval : 'return db.bar.findOne();'} );
     }
 }
 
@@ -140,8 +142,9 @@ var checkWriteOps = function( hasWriteAuth ) {
         assert.eq( 1, testDB.foo.count() );
         checkCommandSucceeded( testDB, {dropDatabase : 1} );
         assert.eq( 0, testDB.foo.count() );
-        // TODO: Uncomment this once create follows regular command codepath
-        //checkCommandSucceeded( testDB.runCommand({create : 'bar'}) );
+        checkCommandSucceeded( testDB, {create : 'baz'} );
+        checkCommandSucceeded( testDB, { $eval : 'db.baz.insert({a:1});'} );
+        assert.eq(1, testDB.baz.findOne().a);
     } else {
         print( "Checking write operations, should fail" );
         testDB.foo.insert({a : 1, i : 1, j : 1});
@@ -160,7 +163,7 @@ var checkWriteOps = function( hasWriteAuth ) {
         passed = true;
         try {
             // For some reason when create fails it throws an exception instead of just returning ok:0
-            res = testDB.runCommand( {create : 'bar'} );
+            res = testDB.runCommand( {create : 'baz'} );
             if ( !res.ok ) {
                 passed = false;
             }
@@ -170,6 +173,11 @@ var checkWriteOps = function( hasWriteAuth ) {
             passed = false;
         }
         assert( !passed );
+        var res = testDB.runCommand( { $eval : 'db.baz.insert({a:1});'} );
+        printjson( res );
+        // If you have read-only auth and try to do a $eval that writes, the $eval command succeeds,
+        // but the write fails
+        assert( !res.ok || testDB.baz.count() == 0 );
     }
 }
 
@@ -208,6 +216,30 @@ var checkAdminWriteOps = function( hasWriteAuth ) {
     }
 }
 
+var checkRemoveShard = function( hasWriteAuth ) {
+    if ( hasWriteAuth ) {
+        // start draining
+        checkCommandSucceeded( adminDB, { removeshard : st.rs1.name } );
+        // Wait for shard to be completely removed
+        checkRemoveShard = function() {
+            res = checkCommandSucceeded( adminDB, { removeshard : st.rs1.name } );
+            return res.msg == 'removeshard completed successfully';
+        }
+        assert.soon( checkRemoveShard , "failed to remove shard" );
+    } else {
+        checkCommandFailed( adminDB, { removeshard : st.rs1.name } );
+    }
+}
+
+var checkAddShard = function( hasWriteAuth ) {
+    if ( hasWriteAuth ) {
+        checkCommandSucceeded( adminDB, { addshard : st.rs1.getURL() } );
+    } else {
+        checkCommandFailed( adminDB, { addshard : st.rs1.getURL() } );
+    }
+}
+
+
 st.stopBalancer();
 
 jsTestLog("Checking admin commands with read-write auth credentials");
@@ -239,5 +271,26 @@ jsTestLog("Checking commands with read-write auth credentials");
 assert( testDB.auth( rwUser, password ) );
 checkReadOps( true );
 checkWriteOps( true );
+
+
+jsTestLog("Check drainging/removing a shard");
+assert( testDB.logout().ok );
+checkRemoveShard( false );
+assert( adminDB.auth( roUser, password ) );
+checkRemoveShard( false );
+assert( adminDB.auth( rwUser, password ) );
+assert( testDB.dropDatabase().ok );
+checkRemoveShard( true );
+adminDB.printShardingStatus();
+
+jsTestLog("Check adding a shard")
+assert( adminDB.logout().ok );
+checkAddShard( false );
+assert( adminDB.auth( roUser, password ) );
+checkAddShard( false );
+assert( adminDB.auth( rwUser, password ) );
+checkAddShard( true );
+adminDB.printShardingStatus();
+
 
 st.stop();

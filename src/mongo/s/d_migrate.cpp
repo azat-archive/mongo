@@ -38,6 +38,7 @@
 #include "../db/repl_block.h"
 #include "../db/dur.h"
 #include "../db/clientcursor.h"
+#include "../db/pagefault.h"
 
 #include "../client/connpool.h"
 #include "../client/distlock.h"
@@ -1401,19 +1402,22 @@ namespace mongo {
             ScopedDbConnection& conn = *connPtr;
             conn->getLastError(); // just test connection
 
-            {
+            {                
                 // 1. copy indexes
-                auto_ptr<DBClientCursor> indexes = conn->getIndexes( ns );
+                
                 vector<BSONObj> all;
-                while ( indexes->more() ) {
-                    all.push_back( indexes->next().getOwned() );
+                {
+                    auto_ptr<DBClientCursor> indexes = conn->getIndexes( ns );
+                    
+                    while ( indexes->more() ) {
+                        all.push_back( indexes->next().getOwned() );
+                    }
                 }
 
-                Client::WriteContext ct( ns );
-
-                string system_indexes = cc().database()->name + ".system.indexes";
                 for ( unsigned i=0; i<all.size(); i++ ) {
                     BSONObj idx = all[i];
+                    Client::WriteContext ct( ns );
+                    string system_indexes = cc().database()->name + ".system.indexes";
                     theDataFileMgr.insertAndLog( system_indexes.c_str() , idx, true /* flag fromMigrate in oplog */ );
                 }
 
@@ -1459,8 +1463,17 @@ namespace mongo {
                     while( i.more() ) {
                         BSONObj o = i.next().Obj();
                         {
-                            Lock::DBWrite lk( ns );
-                            Helpers::upsert( ns, o, true );
+                            PageFaultRetryableSection pgrs;
+                            while ( 1 ) {
+                                try {
+                                    Lock::DBWrite lk( ns );
+                                    Helpers::upsert( ns, o, true );
+                                    break;
+                                }
+                                catch ( PageFaultException& e ) {
+                                    e.touch();
+                                }
+                            }
                         }
                         thisTime++;
                         numCloned++;
