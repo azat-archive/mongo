@@ -459,6 +459,7 @@ namespace mongo {
     }
 
     bool Value::coerceToBool() const {
+        // TODO Unify the implementation with BSONElement::trueValue().
         BSONType type = getType();
         switch(type) {
         case NumberDouble:
@@ -512,15 +513,6 @@ namespace mongo {
         }
 
         return false;
-    }
-
-    intrusive_ptr<const Value> Value::coerceToBoolean() const {
-        bool result = coerceToBool();
-
-        /* always normalize to the singletons */
-        if (result)
-            return Value::getTrue();
-        return Value::getFalse();
     }
 
     int Value::coerceToInt() const {
@@ -609,7 +601,7 @@ namespace mongo {
 
         case jstNULL:
         case Undefined:
-            break;
+            uassert(16371, "can't convert from Null (or Undefined) value type to Date_t", false);
 
         default:
             uassert(16006, str::stream() <<
@@ -617,9 +609,6 @@ namespace mongo {
                     " to double",
                     false);
         } // switch(type)
-
-            verify(false); // CW TODO no conversion available
-        return jstNULL; 
     }
 
     string Value::coerceToString() const {

@@ -747,8 +747,9 @@ namespace mongo {
 
         /* check to see if optimizing comparison operator is supported */
         CmpOp newOp = pCmp->cmpOp;
-        if (newOp == CMP)
-            return pE; // not reversible: there's nothing more we can do
+        // CMP and NE cannot use ExpressionFieldRange which is what this optimization uses
+        if (newOp == CMP || newOp == NE)
+            return pE;
 
         /*
           There's one localized optimization we recognize:  a comparison
@@ -1650,13 +1651,8 @@ namespace mongo {
 
             return Value::createArray(result);
         }
-
-        uassert(16015, str::stream() <<
-                "can't navigate into value of type " << type <<
-                "at \"" << fieldPath.getFieldName(index) <<
-                "\" in dotted path \"" << fieldPath.getPath(false),
-                false);
-        return intrusive_ptr<const Value>();
+        // subdocument field does not exist, return undefined
+        return Value::getUndefined();
     }
 
     intrusive_ptr<const Value> ExpressionFieldPath::evaluate(
@@ -2942,6 +2938,11 @@ namespace mongo {
                  || pLength->getType() == NumberDouble));
         string::size_type lower = static_cast< string::size_type >( pLower->coerceToLong() );
         string::size_type length = static_cast< string::size_type >( pLength->coerceToLong() );
+        if ( lower >= str.length() ) {
+            // If lower > str.length() then string::substr() will throw out_of_range, so return an
+            // empty string if lower is not a valid string index.
+            return Value::createString( "" );
+        }
         return Value::createString( str.substr(lower, length) );
     }
 
@@ -3099,16 +3100,23 @@ namespace mongo {
         intrusive_ptr<const Value> pDate(vpOperand[0]->evaluate(pDocument));
         tm date;
         (pDate->coerceToDate()).toTm(&date);
-        int dayOfWeek = date.tm_wday+1;
+        int dayOfWeek = date.tm_wday;
         int dayOfYear = date.tm_yday;
-        int week = 0;
-        int janFirst = 0;
-        int offset = 0;
+        int prevSundayDayOfYear = dayOfYear - dayOfWeek; // may be negative
+        int nextSundayDayOfYear = prevSundayDayOfYear + 7; // must be positive
 
-        janFirst = dayOfWeek - dayOfYear % 7;
-        offset = (janFirst + 6) % 7;
-        week = (dayOfYear + offset) / 7;
-        return Value::createInt(week);
+        // Return the zero based index of the week of the next sunday, equal to the one based index
+        // of the week of the previous sunday, which is to be returned.
+        int nextSundayWeek = nextSundayDayOfYear / 7;
+
+        // Verify that the week calculation is consistent with strftime "%U".
+        DEV{
+            char buf[3];
+            verify(strftime(buf,3,"%U",&date));
+            verify(int(str::toUnsigned(buf))==nextSundayWeek);
+        }
+
+        return Value::createInt(nextSundayWeek);
     }
 
     const char *ExpressionWeek::getOpName() const {

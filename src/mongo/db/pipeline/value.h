@@ -191,19 +191,12 @@ namespace mongo {
         static intrusive_ptr<const Value> getZero();
         static intrusive_ptr<const Value> getOne();
 
-        /*
-          Coerce (cast) a value to a native bool, using JSON rules.
-
-          @returns the bool value
-        */
+        /**
+         * Coerce (cast) a value to a native bool using BSONElement::trueValue() rules, but with
+         * some types unsupported.  SERVER-6120
+         * @return the bool value
+         */
         bool coerceToBool() const;
-
-        /*
-          Coerce (cast) a value to a Boolean Value, using JSON rules.
-
-          @returns the Boolean Value value
-        */
-        intrusive_ptr<const Value> coerceToBoolean() const;
 
         /*
           Coerce (cast) a value to an int, using JSON rules.
