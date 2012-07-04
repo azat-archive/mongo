@@ -30,8 +30,9 @@ var s6143 = db.runCommand(
 
 // Result should be the following error document
 s6143result = {
-    "errmsg" : "exception: can't convert from BSON Null (or Undefined) value type to Date_t",
-    "code" : 16362,
+    "result" : [],
+    "errmsg" : "exception: can't convert from BSON type NULL to Date",
+    "code" : 16006,
     "ok" : 0
 }
 

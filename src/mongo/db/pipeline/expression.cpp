@@ -161,7 +161,7 @@ namespace mongo {
                 }
                 else { /* nothing else is allowed */
                     uassert(15992, str::stream() <<
-                            "disallowed field type " << fieldType <<
+                            "disallowed field type " << typeName(fieldType) <<
                             " in object expression (at \"" <<
                             fieldName << "\")", false);
                 }
@@ -402,16 +402,7 @@ namespace mongo {
                 ++dateCount;
         }
 
-        /* 
-           We don't allow adding two dates because it doesn't make sense
-           especially since they are in epoch time. However, if there is a
-           string present then we would be appending the dates to a string so
-           having many would not be not a problem.
-        */
-        if ((dateCount > 1) && !stringCount) {
-            uassert(16000, "can't add two dates together", false);
-            return Value::getNull();
-        }
+        uassert(16377, "$add does not support dates", !dateCount);
 
         /*
           If there are non-constant strings, and we've got a copy of the
@@ -437,19 +428,6 @@ namespace mongo {
             }
 
             return Value::createString(stringTotal.str());
-        }
-
-        if (dateCount) {
-            long long dateTotal = 0;
-            for (size_t i = 0; i < n; ++i) {
-                intrusive_ptr<const Value> pValue(vpValue[i]);
-                if (pValue->getType() == Date) 
-                    dateTotal += pValue->coerceToDate();
-                else 
-                    dateTotal += static_cast<long long>(pValue->coerceToDouble()*24*60*60*1000);
-            }
-
-            return Value::createDate(Date_t(dateTotal));
         }
 
         /*
@@ -801,7 +779,7 @@ namespace mongo {
         BSONType rightType = pRight->getType();
         uassert(15994, str::stream() << getOpName() <<
                 ":  no automatic conversion for types " <<
-                leftType << " and " << rightType,
+                typeName(leftType) << " and " << typeName(rightType),
                 leftType == rightType);
         // CW TODO at least for now.  later, handle automatic conversions
 
@@ -840,9 +818,13 @@ namespace mongo {
             cmp = signum(Value::compare(pLeft, pRight));
             break;
 
+        case Timestamp:
+            cmp = signum(Value::compare(pLeft, pRight));
+            break;
+
         default:
             uassert(15995, str::stream() <<
-                    "can't compare values of type " << leftType, false);
+                    "can't compare values of type " << typeName(leftType), false);
             break;
         }
 
@@ -1123,6 +1105,10 @@ namespace mongo {
         checkArgCount(2);
         intrusive_ptr<const Value> pLeft(vpOperand[0]->evaluate(pDocument));
         intrusive_ptr<const Value> pRight(vpOperand[1]->evaluate(pDocument));
+
+        uassert(16373,
+                "$divide does not support dates",
+                pLeft->getType() != Date && pRight->getType() != Date);
 
         double right = pRight->coerceToDouble();
         if (right == 0)
@@ -2282,21 +2268,47 @@ namespace mongo {
 
     intrusive_ptr<const Value> ExpressionMod::evaluate(
         const intrusive_ptr<Document> &pDocument) const {
-        BSONType productType;
         checkArgCount(2);
         intrusive_ptr<const Value> pLeft(vpOperand[0]->evaluate(pDocument));
         intrusive_ptr<const Value> pRight(vpOperand[1]->evaluate(pDocument));
 
-        productType = Value::getWidestNumeric(pRight->getType(), pLeft->getType());
+        BSONType leftType = pLeft->getType();
+        BSONType rightType = pRight->getType();
 
-        long long right = pRight->coerceToLong();
+        uassert(16374, "$mod does not support dates", leftType != Date && rightType != Date);
+
+        // pass along jstNULLs and Undefineds
+        if (leftType == jstNULL || leftType == Undefined)
+            return pLeft;
+        if (rightType == jstNULL || rightType == Undefined)
+            return pRight;
+        // ensure we aren't modding by 0
+        double right = pRight->coerceToDouble();
         if (right == 0)
             return Value::getUndefined();
 
-        long long left = pLeft->coerceToLong();
-        if (productType == NumberLong)
-            return Value::createLong(left % right);
-        return Value::createInt((int)left % right);
+        if (leftType == NumberDouble) {
+            // left is a double, return a double
+            double left = pLeft->coerceToDouble();
+            return Value::createDouble(fmod(left, right));
+        }
+        else if (rightType == NumberDouble && pRight->coerceToInt() != right) {
+            // the shell converts ints to doubles so if right is larger than int max or
+            // if right truncates to something other than itself, it is a real double.
+            // Integer-valued double case is handled below
+            double left = pLeft->coerceToDouble();
+            return Value::createDouble(fmod(left, right));
+        }
+        if (leftType == NumberLong || rightType == NumberLong) {
+            // if either is long, return long
+            long long left = pLeft->coerceToLong();
+            long long rightLong = pRight->coerceToLong();
+            return Value::createLong(left % rightLong);
+        }
+        // lastly they must both be ints, return int
+        int left = pLeft->coerceToInt();
+        int rightInt = pRight->coerceToInt();
+        return Value::createInt(left % rightInt);
     }
 
     const char *ExpressionMod::getOpName() const {
@@ -2364,6 +2376,8 @@ namespace mongo {
         const size_t n = vpOperand.size();
         for(size_t i = 0; i < n; ++i) {
             intrusive_ptr<const Value> pValue(vpOperand[i]->evaluate(pDocument));
+
+            uassert(16375, "$multiply does not support dates", pValue->getType() != Date);
 
             productType = Value::getWidestNumeric(productType, pValue->getType());
             doubleProduct *= pValue->coerceToDouble();
@@ -2926,13 +2940,13 @@ namespace mongo {
         string str = pString->coerceToString();
         uassert(16034, str::stream() << getOpName() <<
                 ":  starting index must be a numeric type (is BSON type " <<
-                pLower->getType() << ")",
+                typeName(pLower->getType()) << ")",
                 (pLower->getType() == NumberInt 
                  || pLower->getType() == NumberLong 
                  || pLower->getType() == NumberDouble));
         uassert(16035, str::stream() << getOpName() <<
                 ":  length must be a numeric type (is BSON type " <<
-                pLength->getType() << ")",
+                typeName(pLength->getType() )<< ")",
                 (pLength->getType() == NumberInt 
                  || pLength->getType() == NumberLong 
                  || pLength->getType() == NumberDouble));
@@ -2976,22 +2990,13 @@ namespace mongo {
         checkArgCount(2);
         intrusive_ptr<const Value> pLeft(vpOperand[0]->evaluate(pDocument));
         intrusive_ptr<const Value> pRight(vpOperand[1]->evaluate(pDocument));
-        if (pLeft->getType() == Date) {
-            long long right;
-            long long left = pLeft->coerceToDate();
-            if (pRight->getType() == Date)
-                right = pRight->coerceToDate();
-            else 
-                right = static_cast<long long>(pRight->coerceToDouble()*24*60*60*1000);
-            return Value::createDate(Date_t(left-right));
-        }
             
-        uassert(15996, "cannot subtract one date from another",
-                pRight->getType() != Date);
-
         productType = Value::getWidestNumeric(
             pRight->getType(), pLeft->getType());
         
+        uassert(16376,
+                "$subtract does not support dates",
+                pLeft->getType() != Date && pRight->getType() != Date);
 
         if (productType == NumberDouble) {
             double right = pRight->coerceToDouble();

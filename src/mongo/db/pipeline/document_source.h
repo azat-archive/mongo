@@ -95,6 +95,15 @@ namespace mongo {
         virtual intrusive_ptr<Document> getCurrent() = 0;
 
         /**
+         * Inform the source that it is no longer needed and may release its resources.  After
+         * dispose() is called the source must still be able to handle iteration requests, but may
+         * become eof().
+         * NOTE: For proper mutex yielding, dispose() must be called on any DocumentSource that will
+         * not be advanced until eof(), see SERVER-6123.
+         */
+        virtual void dispose();
+
+        /**
            Get the source's name.
 
            @returns the string name of the source as a constant string;
@@ -310,9 +319,27 @@ namespace mongo {
     };
 
 
+    /**
+     * Constructs and returns Documents from the BSONObj objects produced by a supplied Cursor.
+     * An object of this type may only be used by one thread, see SERVER-6123.
+     */
     class DocumentSourceCursor :
         public DocumentSource {
     public:
+        /**
+         * Holds a Cursor and all associated state required to access the cursor.  An object of this
+         * type may only be used by one thread.
+         */
+        struct CursorWithContext {
+            /** Takes a read lock that will be held for the lifetime of the object. */
+            CursorWithContext( const string& ns );
+
+            // Must be the first struct member for proper construction and destruction, as other
+            // members may depend on the read lock it acquires.
+            Client::ReadContext _readContext;
+            ClientCursor::Holder _cursor;
+        };
+
         // virtuals from DocumentSource
         virtual ~DocumentSourceCursor();
         virtual bool eof();
@@ -321,6 +348,13 @@ namespace mongo {
         virtual void setSource(DocumentSource *pSource);
         virtual void manageDependencies(
             const intrusive_ptr<DependencyTracker> &pTracker);
+
+        /**
+         * Release the Cursor and the read lock it requires, but without changing the other data.
+         * Releasing the lock is required for proper concurrency, see SERVER-6123.  This
+         * functionality is also used by the explain version of pipeline execution.
+         */
+        virtual void dispose();
 
         /**
           Create a document source based on a cursor.
@@ -332,8 +366,7 @@ namespace mongo {
           @param pExpCtx the expression context for the pipeline
         */
         static intrusive_ptr<DocumentSourceCursor> create(
-            const shared_ptr<Cursor> &pCursor,
-            const string &ns,
+            const shared_ptr<CursorWithContext>& cursorWithContext,
             const intrusive_ptr<ExpressionContext> &pExpCtx);
 
         /*
@@ -369,40 +402,32 @@ namespace mongo {
          */
         void setSort(const shared_ptr<BSONObj> &pBsonObj);
 
-        /**
-           Release the cursor, but without changing the other data.  This
-           is used for the explain version of pipeline execution.
-         */
-        void releaseCursor();
-
     protected:
         // virtuals from DocumentSource
         virtual void sourceToBson(BSONObjBuilder *pBuilder, bool explain) const;
 
     private:
         DocumentSourceCursor(
-            const shared_ptr<Cursor> &pTheCursor, const string &ns,
+            const shared_ptr<CursorWithContext>& cursorWithContext,
             const intrusive_ptr<ExpressionContext> &pExpCtx);
 
         void findNext();
+
         intrusive_ptr<Document> pCurrent;
 
         string ns; // namespace
 
         /*
-          The bsonDependencies must outlive the Cursor wrapped by this
-          source.  Therefore, bsonDependencies must appear before pCursor
+          The bson dependencies must outlive the Cursor wrapped by this
+          source.  Therefore, bson dependencies must appear before pCursor
           in order cause its destructor to be called *after* pCursor's.
          */
         shared_ptr<BSONObj> pQuery;
         shared_ptr<BSONObj> pSort;
-        vector<shared_ptr<BSONObj> > bsonDependencies;
-        shared_ptr<Cursor> pCursor;
 
-        /*
-          In order to yield, we need a ClientCursor.
-         */
-        ClientCursor::Holder pClientCursor;
+        shared_ptr<CursorWithContext> _cursorWithContext;
+
+        ClientCursor::Holder& cursor();
 
         /*
           Advance the cursor, and yield sometimes.
@@ -420,31 +445,6 @@ namespace mongo {
           pipeline.
          */
         intrusive_ptr<DependencyTracker> pDependencies;
-
-        /**
-           (5/14/12 - moved this to private because it's not used atm)
-           Add a BSONObj dependency.
-
-           Some Cursor creation functions rely on BSON objects to specify
-           their query predicate or sort.  These often take a BSONObj
-           by reference for these, but do not copy it.  As a result, the
-           BSONObjs specified must outlive the Cursor.  In order to ensure
-           that, use this to preserve a pointer to the BSONObj here.
-
-           From the outside, you must also make sure the BSONObjBuilder
-           creates a lasting copy of the data, otherwise it will go away
-           when the builder goes out of scope.  Therefore, the typical usage
-           pattern for this is 
-           {
-               BSONObjBuilder builder;
-               // do stuff to the builder
-               shared_ptr<BSONObj> pBsonObj(new BSONObj(builder.obj()));
-               pDocumentSourceCursor->addBsonDependency(pBsonObj);
-           }
-
-           @param pBsonObj pointer to the BSON object to preserve
-         */
-        void addBsonDependency(const shared_ptr<BSONObj> &pBsonObj);
     };
 
 

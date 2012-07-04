@@ -719,6 +719,10 @@ namespace mongo {
             _b.appendNull(num());
         }
 
+        void appendUndefined() {
+            _b.appendUndefined(num());
+        }
+
         /**
          * destructive - ownership moves to returned BSONArray
          * @return owned BSONArray
@@ -796,6 +800,11 @@ namespace mongo {
         BSONArrayBuilder& appendAs( const BSONElement &e, const StringData& name) {
             fill( name );
             append( e );
+            return *this;
+        }
+
+        BSONArrayBuilder& appendTimestamp(unsigned int sec, unsigned int inc) {
+            _b.appendTimestamp(num(), sec, inc);
             return *this;
         }
 

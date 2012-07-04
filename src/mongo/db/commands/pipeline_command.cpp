@@ -18,9 +18,7 @@
 
 #include "db/commands/pipeline.h"
 #include "db/commands/pipeline_d.h"
-#include "db/cursor.h"
 #include "db/interrupt_status_mongod.h"
-#include "db/pdfile.h"
 #include "db/pipeline/accumulator.h"
 #include "db/pipeline/document.h"
 #include "db/pipeline/document_source.h"
@@ -97,10 +95,9 @@ namespace mongo {
             intrusive_ptr<Pipeline> &pPipeline,
             intrusive_ptr<ExpressionContext> &pCtx);
 
-        /*
-          The execute code path holds a READ lock for its entire duration.
-          The Cursor is created, and then documents are pulled out of it until
-          they are exhausted (or some other error occurs).
+        /**
+         * A read lock is acquired and a Cursor is created, then documents are retrieved until the
+         * cursor is exhausted (or another termination condition occurs).
          */
         bool runExecute(
             BSONObjBuilder &result, string &errmsg,
@@ -117,13 +114,7 @@ namespace mongo {
     }
 
     Command::LockType PipelineCommand::locktype() const {
-        /*
-          The locks for this are managed manually.  The problem is that the
-          explain execution uses the direct client interface, and this
-          causes recursive lock warnings if the lock is already held.  As
-          a result, there are two code paths for this.  See the comments in
-          the private section of PipelineCommand for more details.
-         */
+        // Locks are managed manually, in particular by DocumentSourceCursor.
         return NONE;
     }
 
@@ -146,25 +137,10 @@ namespace mongo {
 
         intrusive_ptr<DocumentSourceCursor> pSource;
         
-        /*
-          For EXPLAIN:
-
-          This block is here to contain the scope of the lock.  We need the lock
-          while we prepare the cursor, but we need to have released it by the
-          time the recursive call is made to get the explain information using
-          the direct client interface under the execution phase.
-         */
-        {
-            scoped_ptr<Lock::GlobalRead> lk;
-            if(lockGlobally())
-                lk.reset(new Lock::GlobalRead());
-            Client::ReadContext ctx(ns, dbpath, requiresAuth()); // read lock
-
-            pSource = PipelineD::prepareCursorSource(pPipeline, db, pCtx);
-
-            /* release the Cursor before the lock gets released */
-            pSource->releaseCursor();
-        }
+        pSource = PipelineD::prepareCursorSource(pPipeline, db, pCtx);
+        // Release the Cursor and its read lock.  This prevents double locking when using a
+        // DBDirectClient.
+        pSource->dispose();
 
         /*
           For EXPLAIN this just uses the direct client to do an explain on
@@ -182,11 +158,7 @@ namespace mongo {
         intrusive_ptr<Pipeline> &pPipeline,
         intrusive_ptr<ExpressionContext> &pCtx) {
 
-        scoped_ptr<Lock::GlobalRead> lk;
-        if(lockGlobally())
-            lk.reset(new Lock::GlobalRead());
-        Client::ReadContext ctx(ns, dbpath, requiresAuth()); // read lock
-
+        // The DocumentSourceCursor manages a read lock internally, see SERVER-6123.
         intrusive_ptr<DocumentSourceCursor> pSource(
             PipelineD::prepareCursorSource(pPipeline, db, pCtx));
         return executePipeline(result, errmsg, ns, pPipeline, pSource, pCtx);
