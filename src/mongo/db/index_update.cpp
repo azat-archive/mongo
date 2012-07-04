@@ -631,7 +631,6 @@ namespace mongo {
                  */
                 IndexDetails *id = &d->idx(x);
 
-					 log() << " capped : " << d->isCapped() << endl;
                 if ( !d->isCapped() && !mayDeleteIdIndex && id->isIdIndex() ) {
                     errmsg = "may not delete _id index";
                     return false;
