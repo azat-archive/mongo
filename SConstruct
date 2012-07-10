@@ -26,6 +26,7 @@ import types
 import urllib
 import urllib2
 from buildscripts import utils
+from buildscripts import moduleconfig
 
 import libdeps
 
@@ -835,6 +836,14 @@ def doConfigure(myenv):
         myenv.Append( CPPDEFINES=[ "HEAP_CHECKING" ] )
         myenv.Append( CCFLAGS=["-fno-omit-frame-pointer"] )
 
+    # discover modules (subdirectories of db/modules/), and
+    # load the (python) module for each module's build.py
+    modules = moduleconfig.discover_modules('.')
+
+    # ask each module to configure itself, and return a
+    # dictionary of name => list_of_sources for each module.
+    env["MONGO_MODULES"] = moduleconfig.configure_modules(modules, conf, env)
+
     return conf.Finish()
 
 env = doConfigure( env )
@@ -1050,8 +1059,6 @@ clientEnv['CPPDEFINES'].remove('MONGO_EXPOSE_MACROS')
 if not use_system_version_of_library("boost"):
     clientEnv.Append(LIBS=['boost_thread', 'boost_filesystem', 'boost_system'])
     clientEnv.Prepend(LIBPATH=['$BUILD_DIR/third_party/boost/'])
-
-clientEnv.Prepend(LIBS=['mongoclient'], LIBPATH=['.'])
 
 # The following symbols are exported for use in subordinate SConscript files.
 # Ideally, the SConscript files would be purely declarative.  They would only

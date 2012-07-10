@@ -844,7 +844,7 @@ namespace mongo {
                 }
 
                 BSONObj res;
-                if ( ! c->moveAndCommit( to , maxChunkSizeBytes , res ) ) {
+                if ( ! c->moveAndCommit( to , maxChunkSizeBytes , cmdObj["_secondaryThrottle"].trueValue() , res ) ) {
                     errmsg = "move failed";
                     result.append( "cause" , res );
                     return false;
@@ -1169,7 +1169,6 @@ namespace mongo {
         class CmdShardingGetLastError : public Command {
         public:
             virtual LockType locktype() const { return NONE; }
-            virtual bool requiresAuth() { return false; }
             virtual bool slaveOk() const {
                 return true;
             }
