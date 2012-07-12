@@ -41,7 +41,7 @@ namespace mongo {
 
             BSONObj query = getQuery( cmdObj );
 
-            long bufSize = 1024 * 1024 * 1024 * 2; // 2 gb 
+            unsigned long bufSize = 1024 * 1024 * 1024 * 2; // 2 gb 
             BufBuilder bb( bufSize );
             char * start = bb.buf();
 
