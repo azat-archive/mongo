@@ -287,36 +287,36 @@ namespace mongo {
         pShardPipeline->collectionName = collectionName;
         pShardPipeline->explain = explain;
 
-        /* put the source list aside */
-        SourceVector tempVector(sourceVector);
-        sourceVector.clear();
+        // We will be removing from the front so reverse for now. undone later
+        // TODO: maybe sourceVector should be a deque
+        reverse(sourceVector.begin(), sourceVector.end());
 
         /*
           Run through the pipeline, looking for points to split it into
           shard pipelines, and the rest.
          */
-        while(!tempVector.empty()) {
-            intrusive_ptr<DocumentSource> &pSource = tempVector.front();
+        while(!sourceVector.empty()) {
+            // pop the first source
+            intrusive_ptr<DocumentSource> pSource = sourceVector.back();
+            sourceVector.pop_back();
 
-            /* hang on to this in advance, in case it is a group */
-            DocumentSourceGroup *pGroup =
-                dynamic_cast<DocumentSourceGroup *>(pSource.get());
+            // Check if this source is splittable
+            SplittableDocumentSource* splittable=
+                dynamic_cast<SplittableDocumentSource *>(pSource.get());
 
-            /* move the source from the tempVector to the shard sourceVector */
-            pShardPipeline->sourceVector.push_back(pSource);
-            tempVector.erase(tempVector.begin());
+            if (!splittable){
+                // move the source from the router sourceVector to the shard sourceVector
+                pShardPipeline->sourceVector.push_back(pSource);
+            }
+            else {
+                // split into Router and Shard sources
+                intrusive_ptr<DocumentSource> shardSource  = splittable->getShardSource();
+                intrusive_ptr<DocumentSource> routerSource = splittable->getRouterSource();
+                if (shardSource) pShardPipeline->sourceVector.push_back(shardSource);
+                if (routerSource)          this->sourceVector.push_back(routerSource);
 
-            /*
-              If we found a group, that's a split point.
-             */
-            if (pGroup) {
-                /* start this pipeline with the group merger */
-                sourceVector.push_back(pGroup->createMerger());
-
-                /* and then add everything that remains and quit */
-                for(size_t tempn = tempVector.size(), tempi = 0;
-                    tempi < tempn; ++tempi)
-                    sourceVector.push_back(tempVector[tempi]);
+                // put the sourceVector back in the correct order and exit the loop
+                reverse(sourceVector.begin(), sourceVector.end());
                 break;
             }
         }
@@ -403,50 +403,37 @@ namespace mongo {
           We do this even if we're doing an explain, in order to capture
           the document counts and other stats.  However, we don't capture
           the result documents for explain.
-
-          We wrap all the BSONObjBuilder calls with a try/catch in case the
-          objects get too large and cause an exception.
         */
-        try {
-            if (explain) {
-                if (!pCtx->getInRouter())
-                    writeExplainShard(result, pInputSource);
-                else {
-                    writeExplainMongos(result, pInputSource);
-                }
+        if (explain) {
+            if (!pCtx->getInRouter())
+                writeExplainShard(result, pInputSource);
+            else {
+                writeExplainMongos(result, pInputSource);
             }
-            else
-            {
-                // the array in which the aggregation results reside
-                BSONArrayBuilder resultArray (result.subarrayStart("result"));
-                for(bool hasDoc = !pSource->eof(); hasDoc; hasDoc = pSource->advance()) {
-                    intrusive_ptr<Document> pDocument(pSource->getCurrent());
+        }
+        else {
+            // the array in which the aggregation results reside
+            // cant use subArrayStart() due to error handling
+            BSONArrayBuilder resultArray;
+            for(bool hasDoc = !pSource->eof(); hasDoc; hasDoc = pSource->advance()) {
+                intrusive_ptr<Document> pDocument(pSource->getCurrent());
 
-                    /* add the document to the result set */
-                    BSONObjBuilder documentBuilder (resultArray.subobjStart());
-                    pDocument->toBson(&documentBuilder);
-                    documentBuilder.doneFast();
-                }
-
-                resultArray.doneFast();
+                /* add the document to the result set */
+                BSONObjBuilder documentBuilder (resultArray.subobjStart());
+                pDocument->toBson(&documentBuilder);
+                documentBuilder.doneFast();
+                // object will be too large, assert. the extra 1KB is for headers
+                uassert(16389,
+                        str::stream() << "aggregation result exceeds maximum document size ("
+                                      << BSONObjMaxUserSize / (1024 * 1024) << "MB)",
+                        resultArray.len() < BSONObjMaxUserSize - 1024);
             }
-         } catch(AssertionException &ae) {
-            /* 
-               If its not the "object too large" error, rethrow.
-               At time of writing, that error code comes from
-               mongo/src/mongo/bson/util/builder.h
-            */
-            if (ae.getCode() != 13548)
-                throw;
 
-            /* throw the nicer human-readable error */
-            uassert(16029, str::stream() <<
-                    "aggregation result exceeds maximum document size limit ("
-                    << (BSONObjMaxUserSize / (1024 * 1024)) << "MB)",
-                    false);
-         }
+            resultArray.done();
+            result.appendArray("result", resultArray.arr());
+        }
 
-        return true;
+    return true;
     }
 
     void Pipeline::writeExplainOps(BSONArrayBuilder *pArrayBuilder) const {

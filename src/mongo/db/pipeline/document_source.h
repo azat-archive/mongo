@@ -20,12 +20,12 @@
 
 #include <boost/unordered_map.hpp>
 #include "util/intrusive_counter.h"
-#include "client/parallel.h"
 #include "db/clientcursor.h"
 #include "db/jsobj.h"
 #include "db/pipeline/dependency_tracker.h"
 #include "db/pipeline/document.h"
 #include "db/pipeline/expression.h"
+#include "mongo/db/pipeline/expression_context.h"
 #include "db/pipeline/value.h"
 #include "util/string_writer.h"
 
@@ -39,6 +39,8 @@ namespace mongo {
     class ExpressionFieldPath;
     class ExpressionObject;
     class Matcher;
+    class Shard;
+    class ShardChunkManager;
 
     class DocumentSource :
         public IntrusiveCounterUnsigned,
@@ -223,6 +225,24 @@ namespace mongo {
         long long nRowsOut;
     };
 
+    /** This class marks DocumentSources that should be split between the router and the shards
+     *  See Pipeline::splitForSharded() for details
+     */
+    class SplittableDocumentSource : public DocumentSource {
+    public:
+        /** returns a source to be run on the shards.
+         *  if NULL, don't run on shards
+         */
+        virtual intrusive_ptr<DocumentSource> getShardSource() = 0;
+
+        /** returns a source that combines results from shards.
+         *  if NULL, don't run on router
+         */
+        virtual intrusive_ptr<DocumentSource> getRouterSource() = 0;
+    protected:
+        SplittableDocumentSource(intrusive_ptr<ExpressionContext> ctx) :DocumentSource(ctx) {}
+    };
+
 
     class DocumentSourceBsonArray :
         public DocumentSource {
@@ -267,39 +287,37 @@ namespace mongo {
     };
 
     
-    class DocumentSourceCommandFutures :
+    class DocumentSourceCommandShards :
         public DocumentSource {
     public:
         // virtuals from DocumentSource
-        virtual ~DocumentSourceCommandFutures();
+        virtual ~DocumentSourceCommandShards();
         virtual bool eof();
         virtual bool advance();
         virtual intrusive_ptr<Document> getCurrent();
         virtual void setSource(DocumentSource *pSource);
 
         /* convenient shorthand for a commonly used type */
-        typedef list<shared_ptr<Future::CommandResult> > FuturesList;
+        typedef map<Shard, BSONObj> ShardOutput;
 
         /**
-          Create a DocumentSource that wraps a list of Command::Futures.
+          Create a DocumentSource that wraps the output of many shards
 
-          @param errmsg place to write error messages to; must exist for the
-            lifetime of the created DocumentSourceCommandFutures
-          @param pList the list of futures
+          @param shardOutput output from the individual shards
           @param pExpCtx the expression context for the pipeline
           @returns the newly created DocumentSource
          */
-        static intrusive_ptr<DocumentSourceCommandFutures> create(
-            string &errmsg, FuturesList *pList,
-            const intrusive_ptr<ExpressionContext> &pExpCtx);
+        static intrusive_ptr<DocumentSourceCommandShards> create(
+            const ShardOutput& shardOutput,
+            const intrusive_ptr<ExpressionContext>& pExpCtx);
 
     protected:
         // virtuals from DocumentSource
         virtual void sourceToBson(BSONObjBuilder *pBuilder, bool explain) const;
 
     private:
-        DocumentSourceCommandFutures(string &errmsg, FuturesList *pList,
-            const intrusive_ptr<ExpressionContext> &pExpCtx);
+        DocumentSourceCommandShards(const ShardOutput& shardOutput,
+            const intrusive_ptr<ExpressionContext>& pExpCtx);
 
         /**
           Advance to the next document, setting pCurrent appropriately.
@@ -313,9 +331,8 @@ namespace mongo {
         bool newSource; // set to true for the first item of a new source
         intrusive_ptr<DocumentSourceBsonArray> pBsonSource;
         intrusive_ptr<Document> pCurrent;
-        FuturesList::iterator iterator;
-        FuturesList::iterator listEnd;
-        string &errmsg;
+        ShardOutput::const_iterator iterator;
+        ShardOutput::const_iterator listEnd;
     };
 
 
@@ -337,6 +354,7 @@ namespace mongo {
             // Must be the first struct member for proper construction and destruction, as other
             // members may depend on the read lock it acquires.
             Client::ReadContext _readContext;
+            shared_ptr<ShardChunkManager> _chunkMgr;
             ClientCursor::Holder _cursor;
         };
 
@@ -428,6 +446,7 @@ namespace mongo {
         shared_ptr<CursorWithContext> _cursorWithContext;
 
         ClientCursor::Holder& cursor();
+        const ShardChunkManager* chunkMgr() { return _cursorWithContext->_chunkMgr.get(); }
 
         /*
           Advance the cursor, and yield sometimes.
@@ -561,7 +580,7 @@ namespace mongo {
 
 
     class DocumentSourceGroup :
-        public DocumentSource {
+        public SplittableDocumentSource {
     public:
         // virtuals from DocumentSource
         virtual ~DocumentSourceGroup();
@@ -622,14 +641,9 @@ namespace mongo {
             BSONElement *pBsonElement,
             const intrusive_ptr<ExpressionContext> &pExpCtx);
 
-
-        /**
-          Create a unifying group that can be used to combine group results
-          from shards.
-
-          @returns the grouping DocumentSource
-        */
-        intrusive_ptr<DocumentSource> createMerger();
+        // Virtuals for SplittableDocumentSource
+        virtual intrusive_ptr<DocumentSource> getShardSource();
+        virtual intrusive_ptr<DocumentSource> getRouterSource();
 
         static const char groupName[];
 
@@ -903,7 +917,7 @@ namespace mongo {
 
 
     class DocumentSourceSort :
-        public DocumentSource {
+        public SplittableDocumentSource {
     public:
         // virtuals from DocumentSource
         virtual ~DocumentSourceSort();
@@ -927,6 +941,13 @@ namespace mongo {
          */
         static intrusive_ptr<DocumentSourceSort> create(
             const intrusive_ptr<ExpressionContext> &pExpCtx);
+
+        // Virtuals for SplittableDocumentSource
+        // All work for sort is done in router currently
+        // TODO: do partial sorts on the shards then merge in the router
+        //       Not currently possible due to DocumentSource's cursor-like interface
+        virtual intrusive_ptr<DocumentSource> getShardSource() { return NULL; }
+        virtual intrusive_ptr<DocumentSource> getRouterSource() { return this; }
 
         /**
           Add sort key field.

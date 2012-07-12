@@ -287,6 +287,7 @@ env = Environment( BUILD_DIR=variantDir,
                    CLIENT_SCONSTRUCT='#distsrc/client/SConstruct',
                    DIST_ARCHIVE_SUFFIX='.tgz',
                    EXTRAPATH=get_option("extrapath"),
+                   MODULETEST_LIST='#build/moduletests.txt',
                    MSVS_ARCH=msarch ,
                    PYTHON=utils.find_python(),
                    SERVER_ARCHIVE='${SERVER_DIST_BASENAME}${DIST_ARCHIVE_SUFFIX}',
@@ -744,8 +745,7 @@ if "uname" in dir(os):
 if has_option( "ssl" ):
     env.Append( CPPDEFINES=["MONGO_SSL"] )
     env.Append( LIBS=["ssl"] )
-    if darwin:
-        env.Append( LIBS=["crypto"] )
+    env.Append( LIBS=["crypto"] )
 
 try:
     umask = os.umask(022)
