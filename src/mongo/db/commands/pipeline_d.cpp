@@ -19,6 +19,7 @@
 #include "db/commands/pipeline_d.h"
 
 #include "db/cursor.h"
+#include "db/queryutil.h"
 #include "db/pipeline/document_source.h"
 #include "mongo/client/dbclientinterface.h"
 
@@ -54,6 +55,36 @@ namespace mongo {
           create below.
          */
         shared_ptr<BSONObj> pQueryObj(new BSONObj(queryBuilder.obj()));
+
+        /* Look for an initial simple project; we'll avoid constructing Values
+         * for fields that won't make it through the projection.
+         *
+         * Currently this only supports the basic projections that mongod
+         * already supports natively.
+         * TODO: support any $project
+         */
+
+        BSONObj projection;
+        if (pSources->size()) {
+            const intrusive_ptr<DocumentSource> &source = pSources->front();
+            DocumentSourceProject* projectSource =
+                dynamic_cast<DocumentSourceProject*>(source.get());
+
+            if (projectSource && projectSource->isSimple()) {
+                projection = projectSource->getRaw();
+
+                // remove the projection from the pipeline
+                if (debug) {
+                    // leaving this in for DEBUG build to allow testing that
+                    // $project behaves the same regardless of if it is
+                    // implemented with Projection or DocumentSourceProject
+                    projectSource->setWouldBeRemoved();
+                }
+                else {
+                    pSources->erase(pSources->begin());
+                }
+            }
+        }
 
         /*
           Look for an initial sort; we'll try to add this to the
@@ -116,13 +147,19 @@ namespace mongo {
           cursor.  Either way, we can then apply other optimizations there
           are tickets for, such as SERVER-4507.
          */
+
         shared_ptr<Cursor> pCursor;
         bool initSort = false;
         if (pSort) {
+            const BSONObj queryAndSort = BSON("$query" << *pQueryObj << "$orderby" << *pSortObj);
+            shared_ptr<ParsedQuery> pq (new ParsedQuery(
+                        fullName.c_str(), 0, 0, QueryOption_NoCursorTimeout, queryAndSort, projection));
+
             /* try to create the cursor with the query and the sort */
             shared_ptr<Cursor> pSortedCursor(
                 pCursor = NamespaceDetailsTransient::getCursor(
-                    fullName.c_str(), *pQueryObj, *pSortObj));
+                    fullName.c_str(), *pQueryObj, *pSortObj,
+                    QueryPlanSelectionPolicy::any(), NULL, pq));
 
             if (pSortedCursor.get()) {
                 /* success:  remove the sort from the pipeline */
@@ -134,10 +171,14 @@ namespace mongo {
         }
 
         if (!pCursor.get()) {
+            shared_ptr<ParsedQuery> pq (new ParsedQuery(
+                        fullName.c_str(), 0, 0, QueryOption_NoCursorTimeout, *pQueryObj, projection));
+
             /* try to create the cursor without the sort */
             shared_ptr<Cursor> pUnsortedCursor(
                 pCursor = NamespaceDetailsTransient::getCursor(
-                    fullName.c_str(), *pQueryObj));
+                    fullName.c_str(), *pQueryObj, BSONObj(),
+                    QueryPlanSelectionPolicy::any(), NULL, pq));
 
             pCursor = pUnsortedCursor;
         }
@@ -162,6 +203,9 @@ namespace mongo {
         pSource->setQuery(pQueryObj);
         if (initSort)
             pSource->setSort(pSortObj);
+
+        if (!projection.isEmpty())
+            pSource->setProjection(projection);
 
         return pSource;
     }

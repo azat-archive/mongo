@@ -243,15 +243,15 @@ class mongod(object):
             print >> sys.stderr, "probable bug: self.proc unset in stop()"
             return
         try:
-            # This function not available in Python 2.5
-            self.proc.terminate()
-        except AttributeError:
             if os.sys.platform == "win32":
                 import win32job
                 win32job.TerminateJobObject(self.job_object, -1)
             else:
-                from os import kill
-                kill(self.proc.pid, 15)
+                # This function not available in Python 2.5
+                self.proc.terminate()
+        except AttributeError:
+            from os import kill
+            kill(self.proc.pid, 15)
         self.proc.wait()
         sys.stderr.flush()
         sys.stdout.flush()
@@ -350,7 +350,18 @@ def runTest(test):
     if skipTest(path):
         print "skipping " + path
         return
-    if ext == ".js":
+    if file_of_commands_mode:
+        # smoke.py was invoked like "--mode files --from-file foo",
+        # so don't try to interpret the test path too much
+        if os.sys.platform == "win32":
+            argv = [path]
+        else:
+            argv = shlex.split(path)
+        path = argv[0]
+        # if the command is a python script, use the script name
+        if os.path.basename(path) in ('python', 'python.exe'):
+            path = argv[1]
+    elif ext == ".js":
         argv = [shell_executable, "--port", mongod_port]
         if not usedb:
             argv += ["--nodb"]
@@ -367,14 +378,6 @@ def runTest(test):
         else:
             argv = [test_path and os.path.abspath(os.path.join(test_path, path)) or path,
                     "--port", mongod_port]
-    elif file_of_commands_mode:
-        # smoke.py was invoked like "--mode files --from-file foo",
-        # so don't try to interpret the test path too much
-        argv = shlex.split(path)
-        path = argv[0]
-        # if the command is a python script, use the script name
-        if os.path.basename(path) in ('python', 'python.exe'):
-            path = argv[1]
     else:
         raise Bug("fell off in extenstion case: %s" % path)
 
@@ -554,6 +557,7 @@ suiteGlobalConfig = {"js": ("[!_]*.js", True),
                      "sharding": ("sharding/*.js", False),
                      "tool": ("tool/*.js", False),
                      "aggregation": ("aggregation/*.js", True),
+                     "multiVersion": ("multiVersion/*.js", True )
                      }
 
 def expand_suites(suites,expandUseDB=True):

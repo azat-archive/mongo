@@ -72,17 +72,19 @@ namespace mongo {
         return _cursorWithContext->_cursor;
     }
 
-    void DocumentSourceCursor::advanceAndYield() {
-        cursor()->advance();
+    bool DocumentSourceCursor::canUseCoveredIndex() {
+        // We can't use a covered index when we have a chunk manager because we
+        // need to examine the object to see if it belongs on this shard
+        return (!chunkMgr() &&
+                cursor()->ok() && cursor()->c()->keyFieldsOnly());
+    }
 
+    void DocumentSourceCursor::yieldSometimes() {
         try { // SERVER-5752 may make this try unnecessary
-            /*
-              TODO ask for index key pattern in order to determine which index
-              was used for this particular document; that will allow us to
-              sometimes use ClientCursor::MaybeCovered.
-              See https://jira.mongodb.org/browse/SERVER-5224 .
-            */
-            bool cursorOk = cursor()->yieldSometimes( ClientCursor::WillNeed );
+            // if we are index only we don't need the recored
+            bool cursorOk = cursor()->yieldSometimes(canUseCoveredIndex()
+                                                     ? ClientCursor::DontNeed
+                                                     : ClientCursor::WillNeed);
             uassert( 16028, "collection or database disappeared when cursor yielded", cursorOk );
         }
         catch(SendStaleConfigException& e){
@@ -102,22 +104,40 @@ namespace mongo {
             return;
         }
 
-        for( ; cursor()->ok(); advanceAndYield() ) {
+        for( ; cursor()->ok(); cursor()->advance() ) {
+
+            yieldSometimes();
+            if ( !cursor()->ok() ) {
+                // The cursor was exhausted during the yield.
+                break;
+            }
+
             if ( !cursor()->currentMatches() || cursor()->currentIsDup() )
                 continue;
 
-            /* grab the matching document */
-            BSONObj documentObj( cursor()->current() );
+            // grab the matching document
+            BSONObj documentObj;
+            if (canUseCoveredIndex()) {
+                // Can't have a Chunk Manager if we are here
+                documentObj = cursor()->c()->keyFieldsOnly()->hydrate(cursor()->currKey());
+            }
+            else {
+                documentObj = cursor()->current();
 
-            // check to see if this is a new object we don't own yet
-            // because of a chunk migration
-            if ( chunkMgr() && ! chunkMgr()->belongsToMe( documentObj ) )
-                continue;
+                // check to see if this is a new object we don't own yet
+                // because of a chunk migration
+                if ( chunkMgr() && ! chunkMgr()->belongsToMe(documentObj) )
+                    continue;
+
+                if (_projection) {
+                    documentObj = _projection->transform(documentObj);
+                }
+            }
 
             pCurrent = Document::createFromBsonObj(
                 &documentObj, NULL /* LATER pDependencies.get()*/);
 
-            advanceAndYield();
+            cursor()->advance();
             return;
         }
 
@@ -147,6 +167,12 @@ namespace mongo {
                 pBuilder->append("sort", *pSort);
             }
 
+            BSONObj projectionSpec;
+            if (_projection) {
+                projectionSpec = _projection->getSpec();
+                pBuilder->append("projection", projectionSpec);
+            }
+
             // construct query for explain
             BSONObjBuilder queryBuilder;
             queryBuilder.append("$query", *pQuery);
@@ -156,7 +182,9 @@ namespace mongo {
             Query query(queryBuilder.obj());
 
             DBDirectClient directClient;
-            BSONObj explainResult(directClient.findOne(ns, query));
+            BSONObj explainResult(directClient.findOne(ns, query, _projection
+                                                                  ? &projectionSpec
+                                                                  : NULL));
 
             pBuilder->append("cursor", explainResult);
         }
@@ -191,6 +219,13 @@ namespace mongo {
 
     void DocumentSourceCursor::setSort(const shared_ptr<BSONObj> &pBsonObj) {
         pSort = pBsonObj;
+    }
+
+    void DocumentSourceCursor::setProjection(BSONObj projection) {
+        verify(!_projection);
+        _projection.reset(new Projection);
+        _projection->init(projection);
+        cursor()->fields = _projection;
     }
 
     void DocumentSourceCursor::manageDependencies(
