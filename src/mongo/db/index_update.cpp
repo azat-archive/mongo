@@ -630,7 +630,8 @@ namespace mongo {
                  IndexDetails::info ptr would be bad info.
                  */
                 IndexDetails *id = &d->idx(x);
-                if ( !mayDeleteIdIndex && id->isIdIndex() ) {
+
+                if ( !d->isCapped() && !mayDeleteIdIndex && id->isIdIndex() ) {
                     errmsg = "may not delete _id index";
                     return false;
                 }
