@@ -236,34 +236,9 @@ namespace mongo {
         }
 
         log() << "starting new replica set monitor for replica set " << _name << " with seed of " << seedString( servers ) << endl;
+        _populateHosts_inSetsLock(servers);
 
-        string errmsg;
-        for ( unsigned i = 0; i < servers.size(); i++ ) {
-
-            // Don't check servers we have already
-            if( _find_inlock( servers[i] ) >= 0 ) continue;
-
-            auto_ptr<DBClientConnection> conn( new DBClientConnection( true , 0, 5.0 ) );
-            try{
-                if( ! conn->connect( servers[i] , errmsg ) ){
-                    throw DBException( errmsg, 15928 );
-                }
-                log() << "successfully connected to seed " << servers[i] << " for replica set " << this->_name << endl;
-            }
-            catch( DBException& e ){
-                log() << "error connecting to seed " << servers[i] << causedBy( e ) << endl;
-                // skip seeds that don't work
-                continue;
-            }
-
-            string maybePrimary;
-            _checkConnection( conn.get(), maybePrimary, false, -1 );
-        }
-
-        // Check everything to get the first data
-        _check( true );
-
-        _setServers.insert( pair<string, vector<HostAndPort> >(name, servers) );
+        _seedServers.insert( pair<string, vector<HostAndPort> >(name, servers) );
 
         log() << "replica set monitor for replica set " << _name << " started, address is " << getServerAddress() << endl;
 
@@ -282,7 +257,7 @@ namespace mongo {
 
     void ReplicaSetMonitor::_cacheServerAddresses_inlock() {
         // Save list of current set members so that the monitor can be rebuilt if needed.
-        vector<HostAndPort>& servers = _setServers[_name];
+        vector<HostAndPort>& servers = _seedServers[_name];
         servers.clear();
         for ( vector<Node>::iterator it = _nodes.begin(); it < _nodes.end(); ++it ) {
             servers.push_back( it->addr );
@@ -305,8 +280,8 @@ namespace mongo {
             return i->second;
         }
         if ( createFromSeed ) {
-            map<string,vector<HostAndPort> >::const_iterator j = _setServers.find( name );
-            if ( j != _setServers.end() ) {
+            map<string,vector<HostAndPort> >::const_iterator j = _seedServers.find( name );
+            if ( j != _seedServers.end() ) {
                 log(4) << "Creating ReplicaSetMonitor from cached address" << endl;
                 ReplicaSetMonitorPtr& m = _sets[name];
                 verify( !m );
@@ -362,7 +337,7 @@ namespace mongo {
         log(2) << "Removing ReplicaSetMonitor for " << name << " from replica set table" << endl;
         _sets.erase( name );
         if ( clearSeedCache ) {
-            _setServers.erase( name );
+            _seedServers.erase( name );
         }
     }
 
@@ -421,6 +396,7 @@ namespace mongo {
     HostAndPort ReplicaSetMonitor::getMaster() {
         {
             scoped_lock lk( _lock );
+            verify(_master < static_cast<int>(_nodes.size()));
             if ( _master >= 0 && _nodes[_master].ok )
                 return _nodes[_master].addr;
         }
@@ -429,6 +405,7 @@ namespace mongo {
 
         scoped_lock lk( _lock );
         uassert( 10009 , str::stream() << "ReplicaSetMonitor no master found for set: " << _name , _master >= 0 );
+        verify(_master < static_cast<int>(_nodes.size()));
         return _nodes[_master].addr;
     }
     
@@ -627,7 +604,7 @@ namespace mongo {
             break;
         }
 
-        return changed || origHosts != numHosts;
+        return (changed || origHosts != numHosts) && numHosts > 0;
 
     }
 
@@ -691,6 +668,10 @@ namespace mongo {
 
             _nodes.push_back( Node( h , newConn ) );
         }
+
+        // Invalidate the cached _master index since the _nodes structure has
+        // already been modified.
+        _master = -1;
     }
     
 
@@ -736,16 +717,21 @@ namespace mongo {
 
             if ( nodesOffset >= 0 ) {
                 scoped_lock lk( _lock );
+                Node& node = _nodes[nodesOffset];
 
-                // update ping time with smoothed moving averaged (1/4th the delta)
-                _nodes[nodesOffset].pingTimeMillis +=
-                        (commandTime - _nodes[nodesOffset].pingTimeMillis) / 4;
+                if (node.pingTimeMillis == 0) {
+                    node.pingTimeMillis = commandTime;
+                }
+                else {
+                    // update ping time with smoothed moving averaged (1/4th the delta)
+                    node.pingTimeMillis += (commandTime - node.pingTimeMillis) / 4;
+                }
 
-                _nodes[nodesOffset].hidden = o["hidden"].trueValue();
-                _nodes[nodesOffset].secondary = o["secondary"].trueValue();
-                _nodes[nodesOffset].ismaster = o["ismaster"].trueValue();
+                node.hidden = o["hidden"].trueValue();
+                node.secondary = o["secondary"].trueValue();
+                node.ismaster = o["ismaster"].trueValue();
 
-                _nodes[nodesOffset].lastIsMaster = o.copy();
+                node.lastIsMaster = o.copy();
             }
 
             log( ! verbose ) << "ReplicaSetMonitor::_checkConnection: " << conn->toString()
@@ -779,7 +765,11 @@ namespace mongo {
 
         if ( errorOccured && nodesOffset >= 0 ) {
             scoped_lock lk( _lock );
-            _nodes[nodesOffset].ok = false;
+
+            if (_checkConnMatch_inlock(conn, nodesOffset)) {
+                // Make sure _checkHosts didn't modify the _nodes structure
+                _nodes[nodesOffset].ok = false;
+            }
         }
 
         if ( changed && _hook )
@@ -799,6 +789,7 @@ namespace mongo {
 
             if ( !checkAllSecondaries ) {
                 scoped_lock lk( _lock );
+                verify(_master < static_cast<int>(_nodes.size()));
                 if ( _master >= 0 && _nodes[_master].ok ) {
                   /* Nothing else to do since another thread already
                    * found a usable _master
@@ -912,6 +903,23 @@ namespace mongo {
     }
 
     void ReplicaSetMonitor::check( bool checkAllSecondaries ) {
+        bool isNodeEmpty = false;
+
+        {
+            scoped_lock lk( _lock );
+            isNodeEmpty = _nodes.empty();
+        }
+
+        if (isNodeEmpty) {
+            scoped_lock lk(_setsLock);
+            _populateHosts_inSetsLock(_seedServers[_name]);
+            /* _populateHosts_inlock already refreshes _nodes so no more work
+             * needs to be done. If it was unsuccessful, the succeeding lines
+             * will also fail, so no point in trying.
+             */
+            return;
+        }
+
         shared_ptr<DBClientConnection> masterConn;
 
         {
@@ -919,6 +927,7 @@ namespace mongo {
 
             // first see if the current master is fine
             if ( _master >= 0 ) {
+                verify(_master < static_cast<int>(_nodes.size()));
                 masterConn = _nodes[_master].conn;
             }
         }
@@ -1125,6 +1134,39 @@ namespace mongo {
         return false;
     }
 
+    void ReplicaSetMonitor::_populateHosts_inSetsLock(const vector<HostAndPort>& seedList){
+        verify(_nodes.empty());
+
+        for (vector<HostAndPort>::const_iterator iter = seedList.begin();
+                iter != seedList.end(); ++iter) {
+            // Don't check servers we have already
+            if (_find(*iter) >= 0) continue;
+
+            scoped_ptr<DBClientConnection> conn(new DBClientConnection(true, 0, 5.0));
+
+            try{
+                string errmsg;
+                if (!conn->connect(*iter, errmsg)) {
+                    throw DBException(errmsg, 15928);
+                }
+
+                log() << "successfully connected to seed " << *iter
+                        << " for replica set " << _name << endl;
+            }
+            catch(const DBException& e){
+                log() << "error connecting to seed " << *iter << causedBy(e) << endl;
+                // skip seeds that don't work
+                continue;
+            }
+
+            string maybePrimary;
+            _checkConnection(conn.get(), maybePrimary, false, -1);
+        }
+
+        // Check everything to get the first data
+        _check(true);
+    }
+
     bool ReplicaSetMonitor::Node::matchesTag(const BSONObj& tag) const {
         if (tag.isEmpty()) {
             return true;
@@ -1155,7 +1197,12 @@ namespace mongo {
             return false;
         }
 
-        if (readPreference == ReadPreference_SecondaryOnly &&
+        if ((readPreference == ReadPreference_SecondaryOnly ||
+                /* This is the original behavior for slaveOk. This can result to reading
+                 * data back in time, but the main idea here is to avoid overloading the
+                 * primary when secondary is available.
+                 */
+                readPreference == ReadPreference_SecondaryPreferred) &&
                 !okForSecondaryQueries()) {
             return false;
         }
@@ -1203,7 +1250,7 @@ namespace mongo {
 
     mongo::mutex ReplicaSetMonitor::_setsLock( "ReplicaSetMonitor" );
     map<string,ReplicaSetMonitorPtr> ReplicaSetMonitor::_sets;
-    map<string,vector<HostAndPort> > ReplicaSetMonitor::_setServers;
+    map<string,vector<HostAndPort> > ReplicaSetMonitor::_seedServers;
     ReplicaSetMonitor::ConfigChangeHook ReplicaSetMonitor::_hook;
     int ReplicaSetMonitor::_maxFailedChecks = 30; // At 1 check every 10 seconds, 30 checks takes 5 minutes
 
@@ -1336,7 +1383,7 @@ namespace mongo {
             try {
                 _lastSlaveOkConn->auth(dbname, username, pwd, errmsg, digestPassword, level);
             }
-            catch (const DBException& ex) {
+            catch (const DBException&) {
                 /* Swallow exception. _lastSlaveOkConn is now in failed state.
                  * The next time we create a new secondary connection it will
                  * be authenticated with the credentials from _auths.
@@ -1364,7 +1411,7 @@ namespace mongo {
                 BSONObj dummy;
                 _lastSlaveOkConn->logout(dbname, dummy);
             }
-            catch (const DBException& ex) {
+            catch (const DBException&) {
                 // Make sure we can't use this connection again.
                 verify(_lastSlaveOkConn->isFailed());
             }
@@ -1525,7 +1572,7 @@ namespace mongo {
         try {
             _lastSlaveOkConn->connect(_lastSlaveOkHost);
         }
-        catch (const ConnectException& connEx) {
+        catch (const ConnectException&) {
             // Note: a failed connect will also mark the connection as failed.
             return NULL;
         }

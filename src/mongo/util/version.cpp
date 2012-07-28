@@ -43,7 +43,7 @@ namespace mongo {
      *      1.2.3-rc4-pre-
      * If you really need to do something else you'll need to fix _versionArray()
      */
-    const char versionString[] = "2.1.3-pre-";
+    const char versionString[] = "2.2.0-rc1-pre-";
 
     // See unit test for example outputs
     static BSONArray _versionArray(const char* version){
@@ -122,7 +122,7 @@ namespace mongo {
     }
 
 
-    static Tee * startupWarningsLog = new RamLog("startupWarnings"); //intentionally leaked
+    Tee * startupWarningsLog = new RamLog("startupWarnings"); //intentionally leaked
 
     //
     // system warnings

@@ -828,7 +828,10 @@ if ( typeof _threadInject != "undefined" ){
                                    "jstests/fsync2.js", // May be placed in serialTestsArr once SERVER-4243 is fixed.
                                    "jstests/bench_test1.js",
                                    "jstests/padding.js",
-                                   "jstests/queryoptimizera.js"] );
+                                   "jstests/queryoptimizera.js",
+                                   "jstests/loglong.js" // log might overflow before 
+                                                        // this has a chance to see the message
+                                  ] );
         
         // some tests can't be run in parallel with each other
         var serialTestsArr = [ "jstests/fsync.js"
@@ -1134,14 +1137,18 @@ jsTest.addAuth = function(conn) {
         localconn = new Mongo(hosts.join(','));
     }
     print ("Adding admin user on connection: " + localconn);
-    return localconn.getDB('admin').addUser(jsTestOptions().adminUser, jsTestOptions().adminPassword);
+    return localconn.getDB('admin').addUser(jsTestOptions().adminUser, jsTestOptions().adminPassword,
+                                            false, 'majority', 60000);
 }
 
 jsTest.authenticate = function(conn) {
+    // Set authenticated to stop an infinite recursion from getDB calling back into authenticate
     conn.authenticated = true;
     if (jsTest.options().auth || jsTest.options().keyFile) {
         print ("Authenticating to admin user on connection: " + conn);
-        return conn.getDB('admin').auth(jsTestOptions().adminUser, jsTestOptions().adminPassword);
+        conn.authenticated = conn.getDB('admin').auth(jsTestOptions().adminUser,
+                                                      jsTestOptions().adminPassword);
+        return conn.authenticated;
     }
 }
 

@@ -84,12 +84,13 @@ namespace mongo {
                              NamespaceDetails *d,
                              int idxNo,
                              const BSONObj& obj,
-                             DiskLoc recordLoc) {
+                             DiskLoc recordLoc,
+                             const bool allowDups) {
         IndexDetails &idx = d->idx(idxNo);
         idx.getKeysFromObject(obj, keys);
         if( keys.empty() )
             return;
-        bool dupsAllowed = !idx.unique();
+        bool dupsAllowed = !idx.unique() || allowDups;
         Ordering ordering = Ordering::make(idx.keyPattern());
         
         try {
@@ -301,6 +302,8 @@ namespace mongo {
         pm.finished();
 
         BSONObjExternalSorter& sorter = *(phase1->sorter);
+        // Ensure the index and external sorter have a consistent index interface (and sort order).
+        fassert( 16408, &idx.idxInterface() == &sorter.getIndexInterface() );
 
         if( phase1->multi )
             d->setIndexIsMultikey(ns, idxNo);

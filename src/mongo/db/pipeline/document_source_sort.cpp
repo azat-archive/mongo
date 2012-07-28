@@ -19,7 +19,6 @@
 #include "db/pipeline/document_source.h"
 
 #include "db/jsobj.h"
-#include "db/pipeline/dependency_tracker.h"
 #include "db/pipeline/doc_mem_monitor.h"
 #include "db/pipeline/document.h"
 #include "db/pipeline/expression.h"
@@ -55,7 +54,6 @@ namespace mongo {
         ++docIterator;
         if (docIterator == documents.end()) {
             pCurrent.reset();
-            count = 0;
             return false;
         }
         pCurrent = *docIterator;
@@ -110,6 +108,14 @@ namespace mongo {
             pBuilder->append(ss.str(), (vAscending[i] ? 1 : -1));
         }
     }
+    DocumentSource::GetDepsReturn DocumentSourceSort::getDependencies(set<string>& deps) const {
+        for(size_t i = 0; i < vSortKey.size(); ++i) {
+            vSortKey[i]->addDependencies(deps);
+        }
+
+        return SEE_NEXT;
+    }
+
 
     intrusive_ptr<DocumentSource> DocumentSourceSort::createFromBson(
         BSONElement *pBsonElement,
@@ -213,14 +219,4 @@ namespace mongo {
         */
         return 0;
     }
-
-    void DocumentSourceSort::manageDependencies(
-        const intrusive_ptr<DependencyTracker> &pTracker) {
-        /* get the dependencies out of the matcher */
-        for(SortPaths::iterator i(vSortKey.begin()); i != vSortKey.end(); ++i) {
-            string fieldPath((*i)->getFieldPath(false));
-            pTracker->addDependency(fieldPath, this);
-        }
-    }
-
 }

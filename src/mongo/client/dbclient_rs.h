@@ -99,6 +99,11 @@ namespace mongo {
             }
 
             /**
+             * Checks whether this nodes is compatible with the given readPreference and
+             * tag. Compatibility check is strict in the sense that secondary preferred
+             * is treated like secondary only and primary preferred is treated like
+             * primary only.
+             *
              * @return true if this node is compatible with the read preference and tags.
              */
             bool isCompatible(ReadPreference readPreference, const TagSet* tag) const;
@@ -336,6 +341,16 @@ namespace mongo {
          */
         bool _checkConnMatch_inlock( DBClientConnection* conn, size_t nodeOffset ) const;
 
+        /**
+         * Populates the local view of the set using the list of servers.
+         *
+         * Invariants:
+         * 1. Should be called while holding _setsLock and while not holding _lock since
+         *    this calls #_checkConnection, which locks _checkConnectionLock
+         * 2. _nodes should be empty before this is called
+         */
+        void _populateHosts_inSetsLock(const std::vector<HostAndPort>& seedList);
+
         // protects _localThresholdMillis, _nodes and refs to _nodes
         // (eg. _master & _lastReadPrefHost)
         mutable mongo::mutex _lock;
@@ -367,7 +382,7 @@ namespace mongo {
 
         static mongo::mutex _setsLock; // protects _sets and _setServers
         static map<string,ReplicaSetMonitorPtr> _sets; // set name to Monitor
-        static map<string,vector<HostAndPort> > _setServers; // set name to seed list. Used to rebuild the monitor if it is cleaned up but then the set is accessed again.
+        static map<string,vector<HostAndPort> > _seedServers; // set name to seed list. Used to rebuild the monitor if it is cleaned up but then the set is accessed again.
 
         static ConfigChangeHook _hook;
         int _localThresholdMillis; // local ping latency threshold (protected by _lock)

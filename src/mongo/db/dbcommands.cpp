@@ -474,7 +474,7 @@ namespace mongo {
                 {
                     BSONObjBuilder ttt( t.subobjStart( "currentQueue" ) );
                     int w=0, r=0;
-                    Client::recommendedYieldMicros( &w , &r );
+                    Client::recommendedYieldMicros( &w , &r, true );
                     ttt.append( "total" , w + r );
                     ttt.append( "readers" , r );
                     ttt.append( "writers" , w );
@@ -1373,25 +1373,36 @@ namespace mongo {
                 errmsg = "ns does not exist";
                 return false;
             }
-
+            
+            bool ok = true;
             int oldFlags = nsd->userFlags();
-
-            if ( jsobj["usePowerOf2Sizes"].type() ) {
-                result.appendBool( "usePowerOf2Sizes_old" , nsd->isUserFlagSet( NamespaceDetails::Flag_UsePowerOf2Sizes ) );
-                if ( jsobj["usePowerOf2Sizes"].trueValue() ) {
-                    nsd->setUserFlag( NamespaceDetails::Flag_UsePowerOf2Sizes );
+            
+            BSONObjIterator i( jsobj );
+            while ( i.more() ) {
+                const BSONElement& e = i.next();
+                if ( str::equals( "collMod", e.fieldName() ) ) {
+                    // no-op
+                }
+                else if ( str::equals( "usePowerOf2Sizes", e.fieldName() ) ) {
+                    result.appendBool( "usePowerOf2Sizes_old" , nsd->isUserFlagSet( NamespaceDetails::Flag_UsePowerOf2Sizes ) );
+                    if ( e.trueValue() ) {
+                        nsd->setUserFlag( NamespaceDetails::Flag_UsePowerOf2Sizes );
+                    }
+                    else {
+                        nsd->clearUserFlag( NamespaceDetails::Flag_UsePowerOf2Sizes );
+                    }
                 }
                 else {
-                    nsd->clearUserFlag( NamespaceDetails::Flag_UsePowerOf2Sizes );
+                    errmsg = str::stream() << "unknown command: " << e.fieldName();
+                    ok = false;
                 }
-                
             }
             
             if ( oldFlags != nsd->userFlags() ) {
                 nsd->syncUserFlags( ns );
             }
 
-            return true;
+            return ok;
         }
     } collectionModCommand;
 

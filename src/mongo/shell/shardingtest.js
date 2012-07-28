@@ -819,6 +819,19 @@ ShardingTest.prototype.chunkDiff = function( collName , dbName ){
     return max - min;
 }
 
+// Waits up to one minute for the difference in chunks between the most loaded shard and least
+// loaded shard to be 0 or 1, indicating that the collection is well balanced.
+// This should only be called after creating a big enough chunk difference to trigger balancing.
+ShardingTest.prototype.awaitBalance = function( collName , dbName ) {
+    var shardingTest = this;
+    assert.soon( function() {
+        var x = shardingTest.chunkDiff( collName , dbName );
+        print( "chunk diff: " + x );
+        return x < 2;
+    } , "no balance happened", 60000 );
+
+}
+
 ShardingTest.prototype.getShard = function( coll, query, includeEmpty ){
     var shards = this.getShards( coll, query, includeEmpty )
     assert.eq( shards.length, 1 )
@@ -957,3 +970,26 @@ ShardingTest.prototype.startBalancer = function( timeout, interval ) {
     sh.waitForBalancer( true, timeout, interval )
     db = oldDB
 }
+
+/**
+ * Kills the mongos with index n.
+ */
+ShardingTest.prototype.stopMongos = function(n) {
+    MongoRunner.stopMongos(this['s' + n].port);
+};
+
+/**
+ * Restarts a previously stopped mongos using the same parameter as before.
+ *
+ * Warning: Overwrites the old s (if n = 0) and sn member variables
+ */
+ShardingTest.prototype.restartMongos = function(n) {
+    this.stopMongos(n);
+    var newConn = MongoRunner.runMongos(this['s' + n].commandLine);
+
+    this['s' + n] = newConn;
+    if (n == 0) {
+        this.s = newConn;
+    }
+};
+

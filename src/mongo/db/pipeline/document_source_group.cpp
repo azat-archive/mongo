@@ -85,6 +85,21 @@ namespace mongo {
         pBuilder->append(groupName, insides.done());
     }
 
+    DocumentSource::GetDepsReturn DocumentSourceGroup::getDependencies(set<string>& deps) const {
+        // add the _id
+        pIdExpression->addDependencies(deps);
+
+        // add the rest
+        const size_t n = vFieldName.size();
+        for(size_t i = 0; i < n; ++i) {
+            intrusive_ptr<Accumulator> pA((*vpAccumulatorFactory[i])(pExpCtx));
+            pA->addOperand(vpExpression[i]);
+            pA->addDependencies(deps);
+        }
+
+        return EXHAUSTIVE;
+    }
+
     intrusive_ptr<DocumentSourceGroup> DocumentSourceGroup::create(
         const intrusive_ptr<ExpressionContext> &pExpCtx) {
         intrusive_ptr<DocumentSourceGroup> pSource(
@@ -169,8 +184,7 @@ namespace mongo {
                       Use the projection-like set of field paths to create the
                       group-by key.
                     */
-                    Expression::ObjectCtx oCtx(
-                        Expression::ObjectCtx::DOCUMENT_OK);
+                    Expression::ObjectCtx oCtx(Expression::ObjectCtx::DOCUMENT_OK);
                     intrusive_ptr<Expression> pId(
                         Expression::parseObject(&groupField, &oCtx));
 
@@ -178,7 +192,7 @@ namespace mongo {
                     idSet = true;
                 }
                 else if (groupType == String) {
-                    string groupString(groupField.String());
+                    string groupString(groupField.str());
                     const char *pGroupString = groupString.c_str();
                     if ((groupString.length() == 0) ||
                         (pGroupString[0] != '$'))
@@ -228,14 +242,19 @@ namespace mongo {
                   Treat as a projection field with the additional ability to
                   add aggregation operators.
                 */
+                uassert(16414, str::stream() <<
+                        "the group aggregate field name '" << pFieldName <<
+                        "' cannot be used because $group's field names cannot contain '.'",
+                        !str::contains(pFieldName, '.') );
+
                 uassert(15950, str::stream() <<
-                        "the group aggregate field name \"" <<
-                        pFieldName << "\" cannot be an operator name",
-                        *pFieldName != '$');
+                        "the group aggregate field name '" <<
+                        pFieldName << "' cannot be an operator name",
+                        pFieldName[0] != '$');
 
                 uassert(15951, str::stream() <<
-                        "the group aggregate field \"" << pFieldName <<
-                        "\" must be defined as an expression inside an object",
+                        "the group aggregate field '" << pFieldName <<
+                        "' must be defined as an expression inside an object",
                         groupField.type() == Object);
 
                 BSONObj subField(groupField.Obj());
@@ -253,8 +272,8 @@ namespace mongo {
                                       GroupOpDescCmp);
 
                     uassert(15952, str::stream() <<
-                            "unknown group operator \"" <<
-                            key.pName << "\"",
+                            "unknown group operator '" <<
+                            key.pName << "'",
                             pOp);
 
                     intrusive_ptr<Expression> pGroupExpr;
@@ -280,8 +299,8 @@ namespace mongo {
                 }
 
                 uassert(15954, str::stream() <<
-                        "the computed aggregate \"" <<
-                        pFieldName << "\" must specify exactly one operator",
+                        "the computed aggregate '" <<
+                        pFieldName << "' must specify exactly one operator",
                         subCount == 1);
             }
         }
@@ -296,7 +315,7 @@ namespace mongo {
                 hasNext = pSource->advance()) {
             intrusive_ptr<Document> pDocument(pSource->getCurrent());
 
-            /* get the _id document */
+            /* get the _id value */
             intrusive_ptr<const Value> pId(pIdExpression->evaluate(pDocument));
 
             /* treat Undefined the same as NULL SERVER-4674 */
@@ -375,8 +394,9 @@ namespace mongo {
     }
 
     intrusive_ptr<DocumentSource> DocumentSourceGroup::getRouterSource() {
-        intrusive_ptr<DocumentSourceGroup> pMerger(
-            DocumentSourceGroup::create(pExpCtx));
+        intrusive_ptr<ExpressionContext> pMergerExpCtx = pExpCtx->clone();
+        pMergerExpCtx->setDoingMerge(true);
+        intrusive_ptr<DocumentSourceGroup> pMerger(DocumentSourceGroup::create(pMergerExpCtx));
 
         /* the merger will use the same grouping key */
         pMerger->setIdExpression(ExpressionFieldPath::create(

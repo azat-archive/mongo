@@ -523,7 +523,7 @@ namespace mongo {
 
     } clientListPlugin;
 
-    int Client::recommendedYieldMicros( int * writers , int * readers ) {
+    int Client::recommendedYieldMicros( int * writers , int * readers, bool needExact ) {
         int num = 0;
         int w = 0;
         int r = 0;
@@ -538,6 +538,8 @@ namespace mongo {
                     else
                         r++;
                 }
+                if (num > 100 && !needExact)
+                    break;
             }
         }
 
@@ -546,8 +548,8 @@ namespace mongo {
         if ( readers )
             *readers = r;
 
-        int time = r * 100;
-        time += w * 500;
+        int time = r * 10; // we have to be nice to readers since they don't have priority
+        time += w; // writers are greedy, so we can be mean tot hem
 
         time = min( time , 1000000 );
 

@@ -124,7 +124,7 @@ namespace mongo {
             break;
 
         case String:
-            stringValue = pBsonElement->String();
+            stringValue = pBsonElement->str();
             break;
 
         case Object: {
@@ -205,6 +205,16 @@ namespace mongo {
     intrusive_ptr<const Value> Value::createInt(int value) {
         intrusive_ptr<const Value> pValue(new Value(value));
         return pValue;
+    }
+
+    intrusive_ptr<const Value> Value::createIntOrLong(long long value) {
+        if (value > numeric_limits<int>::max() || value < numeric_limits<int>::min()) {
+            // it is too large to be an int and should remain a long
+            return new Value(value);
+        }
+
+        // should be an int since all arguments were int and it fits
+        return createInt(value);
     }
 
     Value::Value(long long longValue):
@@ -1024,7 +1034,7 @@ namespace mongo {
             }
         }
 
-        /* NOTREACHED */
+        // Reachable, but callers must subsequently err out in this case.
         return Undefined;
     }
 

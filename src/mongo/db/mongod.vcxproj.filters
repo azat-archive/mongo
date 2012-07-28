@@ -157,9 +157,6 @@
     <ClCompile Include="commands\fsync.cpp">
       <Filter>db\commands</Filter>
     </ClCompile>
-    <ClCompile Include="commands\cloud.cpp">
-      <Filter>db\commands</Filter>
-    </ClCompile>
     <ClCompile Include="..\util\debug_util.cpp">
       <Filter>util\Source Files</Filter>
     </ClCompile>
@@ -303,9 +300,6 @@
     </ClCompile>
     <ClCompile Include="ops\delete.cpp">
       <Filter>db\ops</Filter>
-    </ClCompile>
-    <ClCompile Include="pipeline\dependency_tracker.cpp">
-      <Filter>db\pipeline\Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\scripting\engine.cpp">
       <Filter>scripting</Filter>
@@ -945,9 +939,6 @@
       <Filter>third_party\pcre</Filter>
     </ClInclude>
     <ClInclude Include="pipeline\accumulator.h">
-      <Filter>db\pipeline\Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="pipeline\dependency_tracker.h">
       <Filter>db\pipeline\Header Files</Filter>
     </ClInclude>
     <ClInclude Include="pipeline\doc_mem_monitor.h">

@@ -356,20 +356,14 @@ namespace mongo {
         }
     }
 
-    void checkIfReplMissingFromCommandLine() {
+    unsigned long long checkIfReplMissingFromCommandLine() {
         Lock::GlobalWrite lk; // _openAllFiles is false at this point, so this is helpful for the query below to work as you can't open files when readlocked
         if( !cmdLine.usingReplSets() ) {
             Client::GodScope gs;
             DBDirectClient c;
-            unsigned long long x =
-                c.count("local.system.replset");
-            if( x ) {
-                log() << endl;
-                log() << "** warning: mongod started without --replSet yet " << x << " documents are present in local.system.replset" << endl;
-                log() << "**          restart with --replSet unless you are doing maintenance and no other clients are connected" << endl;
-                log() << endl;
-            }
+            return c.count("local.system.replset");
         }
+        return 0;
     }
 
     void clearTmpCollections() {
@@ -506,7 +500,13 @@ namespace mongo {
         // comes after getDur().startup() because this reads from the database
         clearTmpCollections();
 
-        checkIfReplMissingFromCommandLine();
+        unsigned long long missingRepl = checkIfReplMissingFromCommandLine();
+        if (missingRepl) {
+            log() << startupWarningsLog;
+            log() << "** warning: mongod started without --replSet yet " << missingRepl << " documents are present in local.system.replset" << startupWarningsLog;
+            log() << "**          restart with --replSet unless you are doing maintenance and no other clients are connected" << startupWarningsLog;
+            log() << startupWarningsLog;
+        }
 
         Module::initAll();
 
@@ -532,7 +532,14 @@ namespace mongo {
         snapshotThread.go();
         d.clientCursorMonitor.go();
         PeriodicTask::theRunner->go();
-        startTTLBackgroundJob();
+        if (missingRepl) {
+            log() << "** warning: not starting TTL monitor" << startupWarningsLog;
+            log() << "**          if this member is not part of a replica set and you want to use " << startupWarningsLog;
+            log() << "**          TTL collections, remove local.system.replset and restart" << startupWarningsLog;
+        }
+        else {
+            startTTLBackgroundJob();
+        }
 
 #ifndef _WIN32
         CmdLine::launchOk();
@@ -1154,14 +1161,6 @@ namespace mongo {
 
 namespace mongo {
 
-    void pipeSigHandler( int signal ) {
-#ifdef psignal
-        psignal( signal, "Signal Received : ");
-#else
-        cout << "got pipe signal:" << signal << endl;
-#endif
-    }
-
     void abruptQuit(int x) {
         ostringstream ossSig;
         ossSig << "Got signal: " << x << " (" << strsignal( x ) << ")." << endl;
@@ -1239,7 +1238,7 @@ namespace mongo {
 
         verify( signal(SIGABRT, abruptQuit) != SIG_ERR );
         verify( signal(SIGQUIT, abruptQuit) != SIG_ERR );
-        verify( signal(SIGPIPE, pipeSigHandler) != SIG_ERR );
+        verify( signal(SIGPIPE, SIG_IGN) != SIG_ERR );
 
         setupSIGTRAPforGDB();
 
