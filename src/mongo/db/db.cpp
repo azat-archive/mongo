@@ -55,7 +55,6 @@
 #include "mongo/util/version.h"
 
 #if defined(_WIN32)
-# include "mongo/util/hook_windows_memory.h"
 # include "mongo/util/ntservice.h"
 # include <DbgHelp.h>
 #else
@@ -702,6 +701,7 @@ static int mongoDbMain(int argc, char* argv[]) {
 
     rs_options.add_options()
     ("replSet", po::value<string>(), "arg is <setname>[/<optionalseedhostlist>]")
+    ("replIndexPrefetch", po::value<string>(), "specify index prefetching behavior (if secondary) [none|_id_only|all]")
     ;
 
     sharding_options.add_options()
@@ -960,6 +960,9 @@ static int mongoDbMain(int argc, char* argv[]) {
             /* seed list of hosts for the repl set */
             cmdLine._replSet = params["replSet"].as<string>().c_str();
         }
+        if (params.count("replIndexPrefetch")) {
+            cmdLine.rsIndexPrefetch = params["replIndexPrefetch"].as<std::string>();
+        }
         if (params.count("only")) {
             cmdLine.only = params["only"].as<string>().c_str();
         }
@@ -1045,15 +1048,6 @@ static int mongoDbMain(int argc, char* argv[]) {
         // needs to be after things like --configsvr parsing, thus here.
         if( repairpath.empty() )
             repairpath = dbpath;
-
-#if defined(_WIN32)
-        if ( cmdLine.dur ) {
-            // Hook Windows APIs that can allocate memory so that we can RemapLock them out while
-            //  remapPrivateView() has a data file unmapped (so only needed when journaling)
-            // This is the last point where we are still single-threaded, makes hooking simpler
-            hookWindowsMemory();
-        }
-#endif
 
         Module::configAll( params );
         dataFileSync.go();

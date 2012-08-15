@@ -22,7 +22,7 @@
 #include "../client/connpool.h"
 #include "../client/parallel.h"
 #include "../db/commands.h"
-#include "../db/commands/pipeline.h"
+#include "../db/pipeline/pipeline.h"
 #include "../db/pipeline/document_source.h"
 #include "../db/pipeline/expression_context.h"
 #include "../db/queryutil.h"
@@ -43,6 +43,10 @@ namespace mongo {
     bool setParmsMongodSpecific(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl )
     { 
         return true;
+    }
+
+    const char* fetchReplIndexPrefetchParam() { 
+        return "unsupported"; 
     }
 
     namespace dbgrid_pub_cmds {

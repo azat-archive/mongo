@@ -96,6 +96,18 @@ namespace mongo {
             BSONObj o = cursor->next();
             throw UserException( o["code"].numberInt() , o["$err"].String() );
         }
+
+        if ( NamespaceString( cursor->getns() ).isCommand() ) {
+            // For backwards compatibility with v2.0 mongods because in 2.0 commands that care about
+            // versioning (like the count command) will return with the stale config error code, but
+            // don't set the ShardConfigStale result flag on the cursor.
+            // TODO: This should probably be removed for 2.3, as we'll no longer need to support
+            // running with a 2.0 mongod.
+            BSONObj res = cursor->peekFirst();
+            if ( res.hasField( "code" ) && res["code"].Number() == SendStaleConfigCode ) {
+                throw RecvStaleConfigException( "ClusteredCursor::_checkCursor", res );
+            }
+        }
     }
 
     auto_ptr<DBClientCursor> ClusteredCursor::query( const string& server , int num , BSONObj extra , int skipLeft , bool lazy ) {

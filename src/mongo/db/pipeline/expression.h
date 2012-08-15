@@ -16,9 +16,10 @@
 
 #pragma once
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include "db/pipeline/field_path.h"
+#include "db/pipeline/value.h"
 #include "util/intrusive_counter.h"
 
 namespace mongo {
@@ -734,23 +735,6 @@ namespace mongo {
     };
 
 
-    class ExpressionLiteral :
-        public ExpressionNary {
-    public:
-        // virtuals from ExpressionNary
-        virtual ~ExpressionLiteral();
-        virtual intrusive_ptr<const Value> evaluate(
-            const intrusive_ptr<Document> &pDocument) const;
-        virtual const char *getOpName() const;
-        virtual void addOperand(const intrusive_ptr<Expression> &pExpression);
-
-        static intrusive_ptr<ExpressionNary> create();
-
-    private:
-        ExpressionLiteral();
-    };
-
-
     class ExpressionMinute :
         public ExpressionNary {
     public:
@@ -823,24 +807,6 @@ namespace mongo {
 
     private:
         ExpressionMonth();
-    };
-
-
-    class ExpressionNoOp :
-        public ExpressionNary {
-    public:
-        // virtuals from ExpressionNary
-        virtual ~ExpressionNoOp();
-        virtual intrusive_ptr<Expression> optimize();
-        virtual intrusive_ptr<const Value> evaluate(
-            const intrusive_ptr<Document> &pDocument) const;
-        virtual const char *getOpName() const;
-        virtual void addOperand(const intrusive_ptr<Expression> &pExpression);
-
-        static intrusive_ptr<ExpressionNary> create();
-
-    private:
-        ExpressionNoOp();
     };
 
 

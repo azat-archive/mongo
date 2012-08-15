@@ -377,8 +377,8 @@ namespace DocumentTests {
         class Date {
         public:
             void run() {
-                intrusive_ptr<const Value> value = Value::createDate( Date_t( 999 ) );
-                ASSERT_EQUALS( Date_t( 999 ), value->getDate() );
+                intrusive_ptr<const Value> value = Value::createDate(999);
+                ASSERT_EQUALS( 999, value->getDate() );
                 ASSERT_EQUALS( mongo::Date, value->getType() );
                 assertRoundTrips( value );
             }
@@ -657,9 +657,9 @@ namespace DocumentTests {
                 }
             };
 
-            /** Coerce Date_t() to bool. */
+            /** Coerce Date(0) to bool. */
             class DateToBool : public ToBoolTrue {
-                intrusive_ptr<const Value> value() { return Value::createDate( Date_t() ); }
+                intrusive_ptr<const Value> value() { return Value::createDate(0); }
             };
             
             /** Coerce // to bool. */
@@ -843,13 +843,13 @@ namespace DocumentTests {
                 }
             protected:
                 virtual intrusive_ptr<const Value> value() = 0;
-                virtual Date_t expected() = 0;
+                virtual long long expected() = 0;
             };
 
             /** Coerce date to date. */
             class DateToDate : public ToDateBase {
-                intrusive_ptr<const Value> value() { return Value::createDate( Date_t( 888 ) ); }
-                Date_t expected() { return Date_t( 888 ); }
+                intrusive_ptr<const Value> value() { return Value::createDate(888); }
+                long long expected() { return 888; }
             };
 
             /**
@@ -860,7 +860,7 @@ namespace DocumentTests {
                 intrusive_ptr<const Value> value() {
                     return Value::createTimestamp( OpTime( 777, 666 ) );
                 }
-                Date_t expected() { return Date_t( 777 * 1000 ); }
+                long long expected() { return 777 * 1000; }
             };
             
             /** Coerce string to date unsupported. */
@@ -917,8 +917,8 @@ namespace DocumentTests {
             
             /** Coerce date to string. */
             class DateToString : public ToStringBase {
-                intrusive_ptr<const Value> value() { return Value::createDate( Date_t( 12345 ) ); }
-                string expected() { return Date_t( 12345 ).toString(); }
+                intrusive_ptr<const Value> value() { return Value::createDate(1234567890LL*1000); }
+                string expected() { return "2009-02-13T23:31:30"; } // from js
             };
 
             /** Coerce null to string. */
@@ -954,7 +954,7 @@ namespace DocumentTests {
             class DateToTimestamp {
             public:
                 void run() {
-                    ASSERT_THROWS( Value::createDate( Date_t( 1010 ) )->coerceToTimestamp(),
+                    ASSERT_THROWS( Value::createDate(1010)->coerceToTimestamp(),
                                    UserException );
                 }
             };
@@ -1176,9 +1176,7 @@ namespace DocumentTests {
             add<Value::Long>();
             add<Value::Double>();
             add<Value::String>();
-            if ( 0 ) { // SERVER-6556
             add<Value::StringWithNull>();
-            }
             add<Value::Date>();
             add<Value::Timestamp>();
             add<Value::EmptyDocument>();

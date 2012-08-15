@@ -31,6 +31,7 @@ env.StaticLibrary('foundation',
                     'util/time_support.cpp',
                     ],
                   LIBDEPS=['stacktrace',
+                           '$BUILD_DIR/third_party/shim_allocator',
                            '$BUILD_DIR/third_party/shim_boost'])
 
 env.StaticLibrary('stringutils', ['util/stringutils.cpp', 'util/base64.cpp',])
@@ -104,7 +105,7 @@ env.StaticLibrary("coredb", [
         "db/commands.cpp",
         "db/commands/hashcmd.cpp",
         "db/commands/isself.cpp",
-        "db/commands/pipeline.cpp",
+        "db/pipeline/pipeline.cpp",
         "db/dbcommands_generic.cpp",
         "db/dbwebserver.cpp",
         "db/matcher.cpp",
@@ -122,7 +123,7 @@ env.StaticLibrary("coredb", [
         "db/pipeline/document.cpp",
         "db/pipeline/document_source.cpp",
         "db/pipeline/document_source_bson_array.cpp",
-        "db/pipeline/document_source_command_futures.cpp",
+        "db/pipeline/document_source_command_shards.cpp",
         "db/pipeline/document_source_filter.cpp",
         "db/pipeline/document_source_filter_base.cpp",
         "db/pipeline/document_source_group.cpp",
@@ -295,12 +296,9 @@ serverOnlyFiles = [ "db/curop.cpp",
                     "db/commands/group.cpp",
                     "db/commands/mr.cpp",
                     "db/commands/pipeline_command.cpp",
-                    "db/commands/pipeline_d.cpp",
-                    "db/commands/document_source_cursor.cpp",
+                    "db/pipeline/pipeline_d.cpp",
+                    "db/pipeline/document_source_cursor.cpp",
                     "db/driverHelpers.cpp" ]
-
-if os.sys.platform == 'win32':
-    serverOnlyFiles += [ "util/hook_win32.cpp", "util/hook_windows_memory.cpp" ]
 
 env.Library( "dbcmdline", "db/cmdline.cpp" )
 
@@ -510,6 +508,9 @@ def checkGlibc(target,source,env):
 
 distBinaries = []
 
+if windows:
+    distBinaries.extend(['mongod.pdb', 'mongos.pdb'])
+
 def installBinary( e, name ):
     global distBinaries
 
@@ -532,10 +533,11 @@ def installBinary( e, name ):
     if nix:
         e.AddPostAction( inst, 'chmod 755 $TARGET' )
 
-for t in ["mongo" + x for x in normalTools] + ["mongofiles", "bsondump", "mongoperf", "perftest" ]:
+for t in ["mongo" + x for x in normalTools] + ["mongofiles", "bsondump", "mongoperf" ]:
     installBinary( env, t )
     env.Alias("tools", '#/' + add_exe(t))
 
+env.Alias("tools", "#/" + add_exe("perftest"))
 env.Alias("tools", "#/" + add_exe("mongobridge"))
 
 if mongosniff_built:

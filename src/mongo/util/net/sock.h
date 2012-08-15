@@ -17,7 +17,7 @@
 
 #pragma once
 
-#include "../../pch.h"
+#include "mongo/pch.h"
 
 #include <stdio.h>
 
@@ -133,13 +133,33 @@ namespace mongo {
         const enum Type { CLOSED , RECV_ERROR , SEND_ERROR, RECV_TIMEOUT, SEND_TIMEOUT, FAILED_STATE, CONNECT_ERROR } _type;
         
         SocketException( Type t , string server , int code = 9001 , string extra="" ) 
-            : DBException( "socket exception" , code ) , _type(t) , _server(server), _extra(extra){ }
+            : DBException( (string)"socket exception ["  + _getStringType( t ) + "] for " + server, code ),
+              _type(t),
+              _server(server),
+              _extra(extra)
+        {}
+
         virtual ~SocketException() throw() {}
 
         bool shouldPrint() const { return _type != CLOSED; }
         virtual string toString() const;
 
     private:
+
+        // TODO: Allow exceptions better control over their messages
+        static string _getStringType( Type t ){
+            switch (t) {
+                case CLOSED:        return "CLOSED";
+                case RECV_ERROR:    return "RECV_ERROR";
+                case SEND_ERROR:    return "SEND_ERROR";
+                case RECV_TIMEOUT:  return "RECV_TIMEOUT";
+                case SEND_TIMEOUT:  return "SEND_TIMEOUT";
+                case FAILED_STATE:  return "FAILED_STATE";
+                case CONNECT_ERROR: return "CONNECT_ERROR";
+                default:            return "UNKNOWN"; // should never happen
+            }
+        }
+
         string _server;
         string _extra;
     };

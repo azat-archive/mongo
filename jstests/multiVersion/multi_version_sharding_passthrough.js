@@ -4,6 +4,7 @@
 
 var testsToIgnore = [ /dbadmin/,
                       /error1/,
+                      /features1/,
                       /fsync/,
                       /fsync2/,
                       /geo.*/,
@@ -18,8 +19,9 @@ var testsToIgnore = [ /dbadmin/,
                       /bench_test.*/,
                       /mr_replaceIntoDB/,
                       /mr_auth/,
-                      /queryoptimizera/ ]
-              
+                      /queryoptimizera/,
+                      /features2/ ]
+
 var testsThatAreBuggy = [ /apply_ops1/,
                           /count5/,
                           /cursor8/,

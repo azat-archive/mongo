@@ -87,11 +87,15 @@ namespace mongo {
 
     /* static */
     BSONObj WriteBackListener::waitFor( const ConnectionIdent& ident, const OID& oid ) {
+
         Timer t;
+        Timer lastMessageTimer;
+
         while ( t.minutes() < 60 ) {
             {
                 scoped_lock lk( _seenWritebacksLock );
                 WBStatus s = _seenWritebacks[ident];
+
                 if ( oid < s.id ) {
                     // this means we're waiting for a GLE that already passed.
                     // it should be impossible because once we call GLE, no other
@@ -104,10 +108,25 @@ namespace mongo {
                     return s.gle;
                 }
 
+                // Stay in lock so we can use the status
+                if( lastMessageTimer.seconds() > 10 ){
+
+                    warning() << "waiting for writeback " << oid
+                              << " from connection " << ident.toString()
+                              << " for " << t.seconds() << " secs"
+                              << ", currently at id " << s.id << endl;
+
+                    lastMessageTimer.reset();
+                }
             }
+
             sleepmillis( 10 );
         }
-        uasserted( 13403 , str::stream() << "didn't get writeback for: " << oid << " after: " << t.millis() << " ms" );
+
+        uasserted( 13403 , str::stream() << "didn't get writeback for: " << oid
+                                         << " after: " << t.millis() << " ms"
+                                         << " from connection " << ident.toString() );
+
         throw 1; // never gets here
     }
 
@@ -271,16 +290,49 @@ namespace mongo {
                             }
                             ci->noAutoSplit();
 
-                            r.process();
+                            r.process( attempts );
 
                             ci->newRequest(); // this so we flip prev and cur shards
 
                             BSONObjBuilder b;
-                            if ( ! ci->getLastError( "admin", BSON( "getLastError" << 1 ) , b ,
-                                                     true ) ) {
+                            string errmsg;
+                            if ( ! ci->getLastError( "admin",
+                                                     BSON( "getLastError" << 1 ),
+                                                     b,
+                                                     errmsg,
+                                                     true ) )
+                            {
                                 b.appendBool( "commandFailed" , true );
+                                if( ! b.hasField( "errmsg" ) ){
+
+                                    b.append( "errmsg", errmsg );
+                                    gle = b.obj();
+                                }
+                                else if( errmsg.size() > 0 ){
+
+                                    // Rebuild GLE object with errmsg
+                                    // TODO: Make this less clumsy by improving GLE interface
+                                    gle = b.obj();
+
+                                    if( gle["errmsg"].type() == String ){
+
+                                        BSONObj gleNoErrmsg =
+                                                gle.filterFieldsUndotted( BSON( "errmsg" << 1 ),
+                                                                          false );
+                                        BSONObjBuilder bb;
+                                        bb.appendElements( gleNoErrmsg );
+                                        bb.append( "errmsg", gle["errmsg"].String() +
+                                                             " ::and:: " +
+                                                             errmsg );
+                                        gle = bb.obj().getOwned();
+                                    }
+                                }
                             }
-                            gle = b.obj();
+                            else{
+                                gle = b.obj();
+                            }
+
+                            log() << "GLE is " << gle << endl;
 
                             if ( gle["code"].numberInt() == 9517 ) {
 
