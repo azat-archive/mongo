@@ -157,16 +157,10 @@
     <ClCompile Include="commands\fsync.cpp">
       <Filter>db\commands</Filter>
     </ClCompile>
-    <ClCompile Include="commands\cloud.cpp">
-      <Filter>db\commands</Filter>
-    </ClCompile>
     <ClCompile Include="..\util\debug_util.cpp">
       <Filter>util\Source Files</Filter>
     </ClCompile>
     <ClCompile Include="commands\distinct.cpp">
-      <Filter>db\commands</Filter>
-    </ClCompile>
-    <ClCompile Include="commands\document_source_cursor.cpp">
       <Filter>db\commands</Filter>
     </ClCompile>
     <ClCompile Include="geo\2d.cpp">
@@ -214,7 +208,7 @@
     <ClCompile Include="pipeline\document_source_bson_array.cpp">
       <Filter>db\pipeline\Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="pipeline\document_source_command_futures.cpp">
+    <ClCompile Include="pipeline\document_source_command_shards.cpp">
       <Filter>db\pipeline\Source Files</Filter>
     </ClCompile>
     <ClCompile Include="pipeline\document_source_filter.cpp">
@@ -265,9 +259,6 @@
     <ClCompile Include="..\s\chunk.cpp">
       <Filter>s</Filter>
     </ClCompile>
-    <ClCompile Include="commands\cloud.cpp">
-      <Filter>db\commands</Filter>
-    </ClCompile>
     <ClCompile Include="..\s\config.cpp">
       <Filter>s</Filter>
     </ClCompile>
@@ -303,9 +294,6 @@
     </ClCompile>
     <ClCompile Include="ops\delete.cpp">
       <Filter>db\ops</Filter>
-    </ClCompile>
-    <ClCompile Include="pipeline\dependency_tracker.cpp">
-      <Filter>db\pipeline\Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\scripting\engine.cpp">
       <Filter>scripting</Filter>
@@ -404,13 +392,7 @@
       <Filter>util\Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\pch.cpp" />
-    <ClCompile Include="commands\pipeline.cpp">
-      <Filter>db\commands</Filter>
-    </ClCompile>
     <ClCompile Include="commands\pipeline_command.cpp">
-      <Filter>db\commands</Filter>
-    </ClCompile>
-    <ClCompile Include="commands\pipeline_d.cpp">
       <Filter>db\commands</Filter>
     </ClCompile>
     <ClCompile Include="..\util\processinfo.cpp">
@@ -893,12 +875,6 @@
     <ClCompile Include="..\util\touch_pages.cpp">
       <Filter>util\Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\util\hook_win32.cpp">
-      <Filter>util\Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="..\util\hook_windows_memory.cpp">
-      <Filter>util\Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="..\client\authentication_table.cpp">
       <Filter>client\Source Files</Filter>
     </ClCompile>
@@ -910,9 +886,6 @@
     </ClCompile>
     <ClCompile Include="commands\hashcmd.cpp">
       <Filter>db\commands</Filter>
-    </ClCompile>
-    <ClCompile Include="..\client\connection_factory.cpp">
-      <Filter>client\Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\scripting\sm_db.cpp">
       <Filter>scripting</Filter>
@@ -928,6 +901,18 @@
     </ClCompile>
     <ClCompile Include="..\..\third_party\murmurhash3\MurmurHash3.cpp">
       <Filter>third_party\MurmurHash3</Filter>
+    </ClCompile>
+    <ClCompile Include="connection_factory.cpp">
+      <Filter>db\Source Files\a to d</Filter>
+    </ClCompile>
+    <ClCompile Include="pipeline\document_source_cursor.cpp">
+      <Filter>db\pipeline\Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="pipeline\pipeline.cpp">
+      <Filter>db\pipeline\Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="pipeline\pipeline_d.cpp">
+      <Filter>db\pipeline\Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -945,9 +930,6 @@
       <Filter>third_party\pcre</Filter>
     </ClInclude>
     <ClInclude Include="pipeline\accumulator.h">
-      <Filter>db\pipeline\Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="pipeline\dependency_tracker.h">
       <Filter>db\pipeline\Header Files</Filter>
     </ClInclude>
     <ClInclude Include="pipeline\doc_mem_monitor.h">
@@ -993,9 +975,6 @@
       <Filter>bson</Filter>
     </ClInclude>
     <ClInclude Include="..\bson\bsonelement.h">
-      <Filter>bson</Filter>
-    </ClInclude>
-    <ClInclude Include="..\bson\bsoninlines.h">
       <Filter>bson</Filter>
     </ClInclude>
     <ClInclude Include="..\bson\bsonmisc.h">
@@ -1167,12 +1146,6 @@
     <ClInclude Include="..\util\optime.h">
       <Filter>util\Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="commands\pipeline.h">
-      <Filter>db\commands</Filter>
-    </ClInclude>
-    <ClInclude Include="commands\pipeline_d.h">
-      <Filter>db\commands</Filter>
-    </ClInclude>
     <ClInclude Include="..\util\processinfo.h">
       <Filter>util\Header Files</Filter>
     </ClInclude>
@@ -1190,9 +1163,6 @@
     </ClInclude>
     <ClInclude Include="..\util\queue.h">
       <Filter>util\Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="..\util\concurrency\remap_lock.h">
-      <Filter>util\concurrency</Filter>
     </ClInclude>
     <ClInclude Include="..\client\connpool.h">
       <Filter>client\Header Files</Filter>
@@ -1323,9 +1293,6 @@
     <ClInclude Include="commands.h">
       <Filter>db\Header Files\a to d</Filter>
     </ClInclude>
-    <ClInclude Include="concurrency.h">
-      <Filter>db\Header Files\a to d</Filter>
-    </ClInclude>
     <ClInclude Include="curop.h">
       <Filter>db\Header Files\a to d</Filter>
     </ClInclude>
@@ -1348,9 +1315,6 @@
       <Filter>db\Header Files\a to d</Filter>
     </ClInclude>
     <ClInclude Include="dbhelpers.h">
-      <Filter>db\Header Files\a to d</Filter>
-    </ClInclude>
-    <ClInclude Include="dbinfo.h">
       <Filter>db\Header Files\a to d</Filter>
     </ClInclude>
     <ClInclude Include="dbmessage.h">
@@ -1452,9 +1416,6 @@
     <ClInclude Include="projection.h">
       <Filter>db\Header Files\o to z</Filter>
     </ClInclude>
-    <ClInclude Include="query.h">
-      <Filter>db\Header Files\o to z</Filter>
-    </ClInclude>
     <ClInclude Include="queryoptimizer.h">
       <Filter>db\Header Files\o to z</Filter>
     </ClInclude>
@@ -1465,9 +1426,6 @@
       <Filter>db\Header Files\o to z</Filter>
     </ClInclude>
     <ClInclude Include="repl.h">
-      <Filter>db\Header Files\o to z</Filter>
-    </ClInclude>
-    <ClInclude Include="replpair.h">
       <Filter>db\Header Files\o to z</Filter>
     </ClInclude>
     <ClInclude Include="resource.h">
@@ -1644,12 +1602,6 @@
     <ClInclude Include="..\util\touch_pages.h">
       <Filter>util\Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\util\hook_win32.h">
-      <Filter>util\Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="..\util\hook_windows_memory.h">
-      <Filter>util\Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="..\client\authentication_table.h">
       <Filter>client\Header Files</Filter>
     </ClInclude>
@@ -1706,6 +1658,12 @@
     </ClInclude>
     <ClInclude Include="..\..\third_party\murmurhash3\MurmurHash3.h">
       <Filter>third_party\MurmurHash3</Filter>
+    </ClInclude>
+    <ClInclude Include="pipeline\pipeline.h">
+      <Filter>db\pipeline\Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="pipeline\pipeline_d.h">
+      <Filter>db\pipeline\Header Files</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

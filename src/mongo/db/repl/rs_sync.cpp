@@ -164,6 +164,8 @@ namespace replset {
         const char *ns = op.getStringField("ns");
         if (ns && (ns[0] != '\0')) {
             try {
+                // one possible tweak here would be to stay in the read lock for this database 
+                // for multiple prefetches if they are for the same database.
                 Client::ReadContext ctx(ns);
                 prefetchPagesForReplicatedOp(op);
             }
@@ -517,6 +519,14 @@ namespace replset {
             errmsg = "arbiters don't sync";
             return false;
         }
+	if (box.getState().primary()) {
+	    errmsg = "primaries don't sync";
+	    return false;
+	}
+	if (_self != NULL && host == _self->fullName()) {
+	    errmsg = "I cannot sync from myself";
+	    return false;
+	}
 
         // find the member we want to sync from
         Member *newTarget = 0;

@@ -91,24 +91,29 @@ namespace mongo {
             /** @return micros since we started acquiring */
             long long acquireFinished( LockStat* stat );
 
-        protected:
-            friend struct TempRelease;
+            // Accrue elapsed lock time since last we called reset
+            void recordTime();
+            // Start recording a new period, starting now()
+            void resetTime();
 
+        protected:
             explicit ScopedLock( char type ); 
 
-            void tempRelease();
+        private:
+            friend struct TempRelease;
+            void tempRelease(); // TempRelease class calls these
             void relock();
 
-            void _recordTime( long long micros );
-
+        protected:
             virtual void _tempRelease() = 0;
             virtual void _relock() = 0;
 
-            ParallelBatchWriterSupport _lk;
-
         private:
-            Timer _timer; // this is counting the current state
-            char _type;
+            ParallelBatchWriterSupport _pbws_lk;
+
+            void _recordTime( long long micros );
+            Timer _timer;
+            char _type;      // 'r','w','R','W'
             LockStat* _stat; // the stat for the relevant lock to increment when we're done
         };
 

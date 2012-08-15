@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include <boost/unordered_set.hpp>
 #include "db/pipeline/value.h"
@@ -172,6 +172,8 @@ namespace mongo {
         mutable BSONType totalType;
         mutable long long longTotal;
         mutable double doubleTotal;
+        // count is only used by AccumulatorAvg, but lives here to avoid counting non-numeric values
+        mutable long long count;
     };
 
 
@@ -251,7 +253,6 @@ namespace mongo {
 
         AccumulatorAvg(const intrusive_ptr<ExpressionContext> &pCtx);
 
-        mutable long long count;
         intrusive_ptr<ExpressionContext> pCtx;
     };
 

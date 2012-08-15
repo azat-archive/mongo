@@ -55,7 +55,6 @@
 #include "mongo/util/version.h"
 
 #if defined(_WIN32)
-# include "mongo/util/hook_windows_memory.h"
 # include "mongo/util/ntservice.h"
 # include <DbgHelp.h>
 #else
@@ -356,20 +355,21 @@ namespace mongo {
         }
     }
 
-    void checkIfReplMissingFromCommandLine() {
+    /**
+     * Checks if this server was started without --replset but has a config in local.system.replset
+     * (meaning that this is probably a replica set member started in stand-alone mode).
+     *
+     * @returns the number of documents in local.system.replset or 0 if this was started with
+     *          --replset.
+     */
+    unsigned long long checkIfReplMissingFromCommandLine() {
         Lock::GlobalWrite lk; // _openAllFiles is false at this point, so this is helpful for the query below to work as you can't open files when readlocked
         if( !cmdLine.usingReplSets() ) {
             Client::GodScope gs;
             DBDirectClient c;
-            unsigned long long x =
-                c.count("local.system.replset");
-            if( x ) {
-                log() << endl;
-                log() << "** warning: mongod started without --replSet yet " << x << " documents are present in local.system.replset" << endl;
-                log() << "**          restart with --replSet unless you are doing maintenance and no other clients are connected" << endl;
-                log() << endl;
-            }
+            return c.count("local.system.replset");
         }
+        return 0;
     }
 
     void clearTmpCollections() {
@@ -506,7 +506,15 @@ namespace mongo {
         // comes after getDur().startup() because this reads from the database
         clearTmpCollections();
 
-        checkIfReplMissingFromCommandLine();
+        unsigned long long missingRepl = checkIfReplMissingFromCommandLine();
+        if (missingRepl) {
+            log() << startupWarningsLog;
+            log() << "** warning: mongod started without --replSet yet " << missingRepl
+                  << " documents are present in local.system.replset" << startupWarningsLog;
+            log() << "**          restart with --replSet unless you are doing maintenance and no"
+                  << " other clients are connected" << startupWarningsLog;
+            log() << startupWarningsLog;
+        }
 
         Module::initAll();
 
@@ -532,7 +540,16 @@ namespace mongo {
         snapshotThread.go();
         d.clientCursorMonitor.go();
         PeriodicTask::theRunner->go();
-        startTTLBackgroundJob();
+        if (missingRepl) {
+            log() << "** warning: not starting TTL monitor" << startupWarningsLog;
+            log() << "**          if this member is not part of a replica set and you want to use "
+                  << startupWarningsLog;
+            log() << "**          TTL collections, remove local.system.replset and restart"
+                  << startupWarningsLog;
+        }
+        else {
+            startTTLBackgroundJob();
+        }
 
 #ifndef _WIN32
         CmdLine::launchOk();
@@ -684,6 +701,7 @@ static int mongoDbMain(int argc, char* argv[]) {
 
     rs_options.add_options()
     ("replSet", po::value<string>(), "arg is <setname>[/<optionalseedhostlist>]")
+    ("replIndexPrefetch", po::value<string>(), "specify index prefetching behavior (if secondary) [none|_id_only|all]")
     ;
 
     sharding_options.add_options()
@@ -942,6 +960,9 @@ static int mongoDbMain(int argc, char* argv[]) {
             /* seed list of hosts for the repl set */
             cmdLine._replSet = params["replSet"].as<string>().c_str();
         }
+        if (params.count("replIndexPrefetch")) {
+            cmdLine.rsIndexPrefetch = params["replIndexPrefetch"].as<std::string>();
+        }
         if (params.count("only")) {
             cmdLine.only = params["only"].as<string>().c_str();
         }
@@ -1027,15 +1048,6 @@ static int mongoDbMain(int argc, char* argv[]) {
         // needs to be after things like --configsvr parsing, thus here.
         if( repairpath.empty() )
             repairpath = dbpath;
-
-#if defined(_WIN32)
-        if ( cmdLine.dur ) {
-            // Hook Windows APIs that can allocate memory so that we can RemapLock them out while
-            //  remapPrivateView() has a data file unmapped (so only needed when journaling)
-            // This is the last point where we are still single-threaded, makes hooking simpler
-            hookWindowsMemory();
-        }
-#endif
 
         Module::configAll( params );
         dataFileSync.go();
@@ -1154,14 +1166,6 @@ namespace mongo {
 
 namespace mongo {
 
-    void pipeSigHandler( int signal ) {
-#ifdef psignal
-        psignal( signal, "Signal Received : ");
-#else
-        cout << "got pipe signal:" << signal << endl;
-#endif
-    }
-
     void abruptQuit(int x) {
         ostringstream ossSig;
         ossSig << "Got signal: " << x << " (" << strsignal( x ) << ")." << endl;
@@ -1239,7 +1243,7 @@ namespace mongo {
 
         verify( signal(SIGABRT, abruptQuit) != SIG_ERR );
         verify( signal(SIGQUIT, abruptQuit) != SIG_ERR );
-        verify( signal(SIGPIPE, pipeSigHandler) != SIG_ERR );
+        verify( signal(SIGPIPE, SIG_IGN) != SIG_ERR );
 
         setupSIGTRAPforGDB();
 
@@ -1376,6 +1380,8 @@ namespace mongo {
             log() << "*** access violation was a " << acTypeString << addressString << endl;
         }
 
+        log() << "*** stack trace for unhandled exception:" << endl;
+        printWindowsStackTrace( *excPointers->ContextRecord );
         doMinidump(excPointers);
 
         // In release builds, let dbexit() try to shut down cleanly

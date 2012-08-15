@@ -151,6 +151,20 @@ namespace mongo {
      * @param os    ostream& to receive printed stack backtrace
      */
     void printStackTrace( std::ostream& os ) {
+        CONTEXT context;
+        memset( &context, 0, sizeof(context) );
+        context.ContextFlags = CONTEXT_CONTROL;
+        RtlCaptureContext( &context );
+        printWindowsStackTrace( context, os );
+    }
+
+    /**
+     * Print stack trace (using a specified stack context) to "os"
+     * 
+     * @param context   CONTEXT record for stack trace
+     * @param os        ostream& to receive printed stack backtrace
+     */
+    void printWindowsStackTrace( CONTEXT& context, std::ostream& os ) {
         HANDLE process = GetCurrentProcess();
         BOOL ret = SymInitialize( process, NULL, TRUE );
         if ( ret == FALSE ) {
@@ -162,11 +176,6 @@ namespace mongo {
         DWORD options = SymGetOptions();
         options |= SYMOPT_LOAD_LINES | SYMOPT_FAIL_CRITICAL_ERRORS;
         SymSetOptions( options );
-
-        CONTEXT context;
-        memset( &context, 0, sizeof(context) );
-        context.ContextFlags = CONTEXT_CONTROL;
-        RtlCaptureContext( &context );
 
         STACKFRAME64 frame64;
         memset( &frame64, 0, sizeof(frame64) );
@@ -201,7 +210,6 @@ namespace mongo {
         TraceItem traceItem;
         size_t moduleWidth = 0;
         size_t sourceWidth = 0;
-        size_t frameCount = 0;
         for ( size_t i = 0; i < maxBackTraceFrames; ++i ) {
             ret = StackWalk64( imageType,
                                process,
@@ -213,7 +221,6 @@ namespace mongo {
                                NULL,
                                NULL );
             if ( ret == FALSE || frame64.AddrReturn.Offset == 0 ) {
-                frameCount = i;
                 break;
             }
             DWORD64 address = frame64.AddrPC.Offset;
@@ -235,6 +242,7 @@ namespace mongo {
         // print list
         ++moduleWidth;
         ++sourceWidth;
+        size_t frameCount = traceList.size();
         for ( size_t i = 0; i < frameCount; ++i ) {
             os << traceList[i].moduleName << " ";
             size_t width = traceList[i].moduleName.length();

@@ -766,14 +766,9 @@ namespace mongo {
                     }
                 }
                 else {
-                    /* erh 10/16/2009 - this is probably not relevant any more since its auto-created, but not worth removing */
-                    
-                    // this is the old version that doesn't create _id indexes on capped collections
-                    //RARELY if (nsd && !nsd->isCapped()) { ensureHaveIdIndex(ns); } // otherwise updates will be slow
-                    
-                    // this version creates indexes on all collections, including capped
-                    // as long we apply inserts as updates, this is needed for performance
-                    RARELY if ( nsd ) { ensureHaveIdIndex(ns); } // otherwise updates will be slow
+                    // probably don't need this since all replicated colls have _id indexes now
+                    // but keep it just in case
+                    RARELY if ( nsd && !nsd->isCapped() ) { ensureHaveIdIndex(ns); }
 
                     /* todo : it may be better to do an insert here, and then catch the dup key exception and do update
                               then.  very few upserts will not be inserts...
@@ -787,13 +782,11 @@ namespace mongo {
         }
         else if ( *opType == 'u' ) {
             opCounters->gotUpdate();
-            // dm do we create this for a capped collection?
-            //  - if not, updates would be slow
-            //    - but if were by id would be slow on primary too so maybe ok
-            //    - if on primary was by another key and there are other indexes, this could be very bad w/out an index
-            //  - if do create, odd to have on secondary but not primary.  also can cause secondary to block for
-            //    quite a while on creation.
-            RARELY if (nsd && !nsd->isCapped()) { ensureHaveIdIndex(ns); } // otherwise updates will be super slow
+
+            // probably don't need this since all replicated colls have _id indexes now
+            // but keep it just in case
+            RARELY if ( nsd && !nsd->isCapped() ) { ensureHaveIdIndex(ns); }
+
             OpDebug debug;
             BSONObj updateCriteria = op.getObjectField("o2");
             bool upsert = fields[3].booleanSafe();

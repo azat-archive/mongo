@@ -66,7 +66,44 @@ namespace mongo {
             dur::setAgeOutJournalFiles(r);
             return true;
         }
+        if( cmdObj.hasElement( "replIndexPrefetch" ) ) {
+            if (!theReplSet) {
+                errmsg = "replication is not enabled";
+                return false;
+            }
+            std::string prefetch = cmdObj["replIndexPrefetch"].valuestrsafe();
+            log() << "changing replication index prefetch behavior to " << prefetch << endl;
+            // default:
+            ReplSetImpl::IndexPrefetchConfig prefetchConfig = ReplSetImpl::PREFETCH_ALL;
+            if (prefetch == "none")
+                prefetchConfig = ReplSetImpl::PREFETCH_NONE;
+            else if (prefetch == "_id_only")
+                prefetchConfig = ReplSetImpl::PREFETCH_ID_ONLY;
+            else if (prefetch == "all")
+                prefetchConfig = ReplSetImpl::PREFETCH_ALL;
+            else {
+                warning() << "unrecognized indexPrefetch setting: " << prefetch << endl;
+            }
+            theReplSet->setIndexPrefetchConfig(prefetchConfig);
+            return true;
+        }
+
         return false;
+    }
+
+    const char* fetchReplIndexPrefetchParam() {
+        if (!theReplSet) return "uninitialized";
+        ReplSetImpl::IndexPrefetchConfig ip = theReplSet->getIndexPrefetchConfig();
+        switch (ip) {
+        case ReplSetImpl::PREFETCH_NONE:
+            return "none";
+        case ReplSetImpl::PREFETCH_ID_ONLY:
+            return "_id_only";
+        case ReplSetImpl::PREFETCH_ALL:
+            return "all";
+        default:
+            return "invalid";
+        }
     }
 
     /* reset any errors so that getlasterror comes back clean.
@@ -474,7 +511,7 @@ namespace mongo {
                 {
                     BSONObjBuilder ttt( t.subobjStart( "currentQueue" ) );
                     int w=0, r=0;
-                    Client::recommendedYieldMicros( &w , &r );
+                    Client::recommendedYieldMicros( &w , &r, true );
                     ttt.append( "total" , w + r );
                     ttt.append( "readers" , r );
                     ttt.append( "writers" , w );
@@ -1373,25 +1410,36 @@ namespace mongo {
                 errmsg = "ns does not exist";
                 return false;
             }
-
+            
+            bool ok = true;
             int oldFlags = nsd->userFlags();
-
-            if ( jsobj["usePowerOf2Sizes"].type() ) {
-                result.appendBool( "usePowerOf2Sizes_old" , nsd->isUserFlagSet( NamespaceDetails::Flag_UsePowerOf2Sizes ) );
-                if ( jsobj["usePowerOf2Sizes"].trueValue() ) {
-                    nsd->setUserFlag( NamespaceDetails::Flag_UsePowerOf2Sizes );
+            
+            BSONObjIterator i( jsobj );
+            while ( i.more() ) {
+                const BSONElement& e = i.next();
+                if ( str::equals( "collMod", e.fieldName() ) ) {
+                    // no-op
+                }
+                else if ( str::equals( "usePowerOf2Sizes", e.fieldName() ) ) {
+                    result.appendBool( "usePowerOf2Sizes_old" , nsd->isUserFlagSet( NamespaceDetails::Flag_UsePowerOf2Sizes ) );
+                    if ( e.trueValue() ) {
+                        nsd->setUserFlag( NamespaceDetails::Flag_UsePowerOf2Sizes );
+                    }
+                    else {
+                        nsd->clearUserFlag( NamespaceDetails::Flag_UsePowerOf2Sizes );
+                    }
                 }
                 else {
-                    nsd->clearUserFlag( NamespaceDetails::Flag_UsePowerOf2Sizes );
+                    errmsg = str::stream() << "unknown command: " << e.fieldName();
+                    ok = false;
                 }
-                
             }
             
             if ( oldFlags != nsd->userFlags() ) {
                 nsd->syncUserFlags( ns );
             }
 
-            return true;
+            return ok;
         }
     } collectionModCommand;
 

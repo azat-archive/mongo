@@ -502,10 +502,9 @@ namespace mongo {
                     else
                         tablecell( ss , "" );
                     tablecell( ss , co.getOp() );
-                    tablecell( ss , co.getNS() );
-                    if ( co.haveQuery() ) {
-                        tablecell( ss , co.query() );
-                    }
+                    tablecell( ss , html::escape( co.getNS() ) );
+                    if ( co.haveQuery() )
+                        tablecell( ss , html::escape( co.query().toString() ) );
                     else
                         tablecell( ss , "" );
                     tablecell( ss , co.getRemoteString() );
@@ -523,7 +522,7 @@ namespace mongo {
 
     } clientListPlugin;
 
-    int Client::recommendedYieldMicros( int * writers , int * readers ) {
+    int Client::recommendedYieldMicros( int * writers , int * readers, bool needExact ) {
         int num = 0;
         int w = 0;
         int r = 0;
@@ -538,6 +537,8 @@ namespace mongo {
                     else
                         r++;
                 }
+                if (num > 100 && !needExact)
+                    break;
             }
         }
 

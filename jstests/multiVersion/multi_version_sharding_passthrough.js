@@ -4,6 +4,7 @@
 
 var testsToIgnore = [ /dbadmin/,
                       /error1/,
+                      /features1/,
                       /fsync/,
                       /fsync2/,
                       /geo.*/,
@@ -18,8 +19,9 @@ var testsToIgnore = [ /dbadmin/,
                       /bench_test.*/,
                       /mr_replaceIntoDB/,
                       /mr_auth/,
-                      /queryoptimizera/ ]
-              
+                      /queryoptimizera/,
+                      /features2/ ]
+
 var testsThatAreBuggy = [ /apply_ops1/,
                           /count5/,
                           /cursor8/,
@@ -329,6 +331,7 @@ v22Only.push( /^find_and_modify4$/ )
 v22Only.push( /^update6$/ )
 v22Only.push( /^indexp$/ )
 v22Only.push( /^index_elemmatch1$/ )
+v22Only.push( /^splitvector$/ )
 
 // TODO
 // mr_merge2 - causes segfault?
@@ -353,7 +356,6 @@ errors = errors.concat(
 //
 
 v22Only.push( /.*auth.*/ ) // Can't run auth tests
-v22Only.push( /^splitvector$/ ) // Splitvector has been removed from mongod
 
 jsTest.log( "Running multi-version 2.2/2.0 mongod/mongos passthrough tests..." )
 

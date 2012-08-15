@@ -313,17 +313,16 @@ namespace mongo {
         NamespaceDetails *d = nsdetails(ns);
         verify(d);
         
-        bool ensure = false;
-        if ( options.getField( "autoIndexId" ).type() ) {
-            if ( options["autoIndexId"].trueValue() ) {
-                ensure = true;
-            }
+        bool ensure = true;
+
+        // respect autoIndexId if set. otherwise, create an _id index for all colls, except for
+        // capped ones in local w/o autoIndexID (reason for the exception is for the oplog and
+        //  non-replicated capped colls)
+        if( options.hasField( "autoIndexId" ) ||
+            (newCapped && str::equals( nsToDatabase( ns ).c_str() ,  "local" )) ) {
+            ensure = options.getField( "autoIndexId" ).trueValue();
         }
-        else {
-            if ( !newCapped ) {
-                ensure=true;
-            }
-        }
+
         if( ensure ) {
             if( deferIdIndex )
                 *deferIdIndex = true;
@@ -1342,8 +1341,10 @@ namespace mongo {
 
         BSONObj info = loc.obj();
         bool background = info["background"].trueValue();
-        // if this is not readable, let's move things along
-        if (background && ((!theReplSet && cc().isSyncThread()) || (theReplSet && !theReplSet->isSecondary()))) {
+        if( background && cc().isSyncThread() ) {
+            /* don't do background indexing on slaves.  there are nuances.  this could be added later
+                but requires more code.
+                */
             log() << "info: indexing in foreground on this replica; was a background index build on the primary" << endl;
             background = false;
         }
@@ -1433,8 +1434,9 @@ namespace mongo {
             BSONObj io((const char *) obuf);
             BSONElement idField = io.getField( "_id" );
             uassert( 10099 ,  "_id cannot be an array", idField.type() != Array );
-            // we don't add _id for capped collections as they don't have an _id index
-            if( idField.eoo() && !wouldAddIndex && strstr(ns, ".local.") == 0 && d->haveIdIndex() ) {
+            // we don't add _id for capped collections in local as they don't have an _id index
+            if( idField.eoo() && !wouldAddIndex &&
+                !str::equals( nsToDatabase( ns ).c_str() , "local" ) && d->haveIdIndex() ) {
                 if( addedID )
                     *addedID = true;
                 addID = len;

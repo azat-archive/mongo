@@ -38,22 +38,9 @@ namespace mongo {
     Value::~Value() {
     }
 
-    Value::Value():
-        type(jstNULL),
-        oidValue(),
-        dateValue(),
-        stringValue(),
-        pDocumentValue(),
-        vpValue() {
-    }
+    Value::Value(): type(jstNULL) {}
 
-    Value::Value(BSONType theType):
-        type(theType),
-        oidValue(),
-        dateValue(),
-        stringValue(),
-        pDocumentValue(),
-        vpValue() {
+    Value::Value(BSONType theType): type(theType) {
         switch(type) {
         case Undefined:
         case jstNULL:
@@ -61,24 +48,28 @@ namespace mongo {
         case Array: // empty
             break;
 
-        case NumberDouble:
-            simple.doubleValue = 0;
+        case Bool:
+            boolValue = false;
             break;
 
-        case Bool:
-            simple.boolValue = false;
+        case NumberDouble:
+            doubleValue = 0;
             break;
 
         case NumberInt:
-            simple.intValue = 0;
-            break;
-
-        case Timestamp:
-            timestampValue = OpTime();
+            intValue = 0;
             break;
 
         case NumberLong:
-            simple.longValue = 0;
+            longValue = 0;
+            break;
+
+        case Date:
+            dateValue = 0;
+            break;
+
+        case Timestamp:
+            timestampValue = 0;
             break;
 
         default:
@@ -89,12 +80,10 @@ namespace mongo {
         }
     }
 
-    Value::Value(bool boolValue):
-        type(Bool),
-        pDocumentValue(),
-        vpValue() {
-        simple.boolValue = boolValue;
-    }
+    Value::Value(bool value)
+        : type(Bool)
+        , boolValue(value)
+    {}
 
     intrusive_ptr<const Value> Value::createFromBsonElement(
         BSONElement *pBsonElement) {
@@ -120,11 +109,11 @@ namespace mongo {
         vpValue() {
         switch(type) {
         case NumberDouble:
-            simple.doubleValue = pBsonElement->Double();
+            doubleValue = pBsonElement->Double();
             break;
 
         case String:
-            stringValue = pBsonElement->String();
+            stringValue = pBsonElement->str();
             break;
 
         case Object: {
@@ -147,15 +136,17 @@ namespace mongo {
         }
 
         case jstOID:
-            oidValue = pBsonElement->OID();
+            BOOST_STATIC_ASSERT(sizeof(oidValue) == sizeof(OID));
+            memcpy(oidValue, pBsonElement->OID().getData(), sizeof(oidValue));
             break;
 
         case Bool:
-            simple.boolValue = pBsonElement->Bool();
+            boolValue = pBsonElement->Bool();
             break;
 
         case Date:
-            dateValue = pBsonElement->Date();
+            // this is really signed but typed as unsigned for historical reasons
+            dateValue = static_cast<long long>(pBsonElement->Date().millis);
             break;
 
         case RegEx:
@@ -164,15 +155,16 @@ namespace mongo {
             break;
 
         case NumberInt:
-            simple.intValue = pBsonElement->numberInt();
+            intValue = pBsonElement->numberInt();
             break;
 
         case Timestamp:
-            timestampValue = pBsonElement->_opTime();
+            // asDate is a poorly named function that returns a ReplTime
+            timestampValue = pBsonElement->_opTime().asDate();
             break;
 
         case NumberLong:
-            simple.longValue = pBsonElement->numberLong();
+            longValue = pBsonElement->numberLong();
             break;
 
         case Undefined:
@@ -195,60 +187,57 @@ namespace mongo {
         }
     }
 
-    Value::Value(int intValue):
-        type(NumberInt),
-        pDocumentValue(),
-        vpValue() {
-        simple.intValue = intValue;
-    }
+    Value::Value(int value)
+        : type(NumberInt)
+        , intValue(value)
+    {}
 
     intrusive_ptr<const Value> Value::createInt(int value) {
         intrusive_ptr<const Value> pValue(new Value(value));
         return pValue;
     }
 
-    Value::Value(long long longValue):
-        type(NumberLong),
-        pDocumentValue(),
-        vpValue() {
-        simple.longValue = longValue;
+    intrusive_ptr<const Value> Value::createIntOrLong(long long value) {
+        if (value > numeric_limits<int>::max() || value < numeric_limits<int>::min()) {
+            // it is too large to be an int and should remain a long
+            return new Value(value);
+        }
+
+        // should be an int since all arguments were int and it fits
+        return createInt(value);
     }
+
+    Value::Value(long long value)
+        : type(NumberLong)
+        , longValue(value)
+    {}
 
     intrusive_ptr<const Value> Value::createLong(long long value) {
         intrusive_ptr<const Value> pValue(new Value(value));
         return pValue;
     }
 
-    Value::Value(double value):
-        type(NumberDouble),
-        pDocumentValue(),
-        vpValue() {
-        simple.doubleValue = value;
-    }
+    Value::Value(double value)
+        : type(NumberDouble)
+        , doubleValue(value)
+    {}
 
     intrusive_ptr<const Value> Value::createDouble(double value) {
         intrusive_ptr<const Value> pValue(new Value(value));
         return pValue;
     }
 
-    Value::Value(const Date_t &value):
-        type(Date),
-        pDocumentValue(),
-        vpValue() {
-        dateValue = value;
-    }
-
-    intrusive_ptr<const Value> Value::createDate(const Date_t &value) {
-        intrusive_ptr<const Value> pValue(new Value(value));
+    intrusive_ptr<const Value> Value::createDate(const long long &value) {
+        // Can't directly construct because constructor would clash with createLong
+        intrusive_ptr<Value> pValue(new Value(Date));
+        pValue->dateValue = value;
         return pValue;
     }
 
-    Value::Value(const OpTime& value):
-        type(Timestamp),
-        pDocumentValue(),
-        vpValue() {
-        timestampValue = value;
-    }
+    Value::Value(const OpTime& value)
+        : type(Timestamp)
+        , timestampValue(value.asDate())
+    {}
 
     intrusive_ptr<const Value> Value::createTimestamp(const OpTime& value) {
         intrusive_ptr<const Value> pValue(new Value(value));
@@ -294,12 +283,12 @@ namespace mongo {
     double Value::getDouble() const {
         BSONType type = getType();
         if (type == NumberInt)
-            return simple.intValue;
+            return intValue;
         if (type == NumberLong)
-            return static_cast< double >( simple.longValue );
+            return static_cast< double >( longValue );
 
         verify(type == NumberDouble);
-        return simple.doubleValue;
+        return doubleValue;
     }
 
     string Value::getString() const {
@@ -343,15 +332,15 @@ namespace mongo {
 
     OID Value::getOid() const {
         verify(getType() == jstOID);
-        return oidValue;
+        return OID(oidValue);
     }
 
     bool Value::getBool() const {
         verify(getType() == Bool);
-        return simple.boolValue;
+        return boolValue;
     }
 
-    Date_t Value::getDate() const {
+    long long Value::getDate() const {
         verify(getType() == Date);
         return dateValue;
     }
@@ -373,16 +362,16 @@ namespace mongo {
 
     int Value::getInt() const {
         verify(getType() == NumberInt);
-        return simple.intValue;
+        return intValue;
     }
 
     long long Value::getLong() const {
         BSONType type = getType();
         if (type == NumberInt)
-            return simple.intValue;
+            return intValue;
 
         verify(type == NumberLong);
-        return simple.longValue;
+        return longValue;
     }
 
     void Value::addToBson(Builder *pBuilder) const {
@@ -429,7 +418,7 @@ namespace mongo {
             break;
 
         case Date:
-            pBuilder->append(getDate());
+            pBuilder->append(Date_t(getDate()));
             break;
 
         case RegEx:
@@ -490,7 +479,7 @@ namespace mongo {
         BSONType type = getType();
         switch(type) {
         case NumberDouble:
-            if (simple.doubleValue != 0)
+            if (doubleValue != 0)
                 return true;
             break;
 
@@ -506,7 +495,7 @@ namespace mongo {
             return true;
 
         case Bool:
-            if (simple.boolValue)
+            if (boolValue)
                 return true;
             break;
 
@@ -515,12 +504,12 @@ namespace mongo {
             break;
 
         case NumberInt:
-            if (simple.intValue != 0)
+            if (intValue != 0)
                 return true;
             break;
 
         case NumberLong:
-            if (simple.longValue != 0)
+            if (longValue != 0)
                 return true;
             break;
 
@@ -545,13 +534,13 @@ namespace mongo {
     int Value::coerceToInt() const {
         switch(type) {
         case NumberDouble:
-            return (int)simple.doubleValue;
+            return (int)doubleValue;
 
         case NumberInt:
-            return simple.intValue;
+            return intValue;
 
         case NumberLong:
-            return (int)simple.longValue;
+            return (int)longValue;
 
         case jstNULL:
         case Undefined:
@@ -571,13 +560,13 @@ namespace mongo {
     long long Value::coerceToLong() const {
         switch(type) {
         case NumberDouble:
-            return (long long)simple.doubleValue;
+            return (long long)doubleValue;
 
         case NumberInt:
-            return simple.intValue;
+            return intValue;
 
         case NumberLong:
-            return simple.longValue;
+            return longValue;
 
         case jstNULL:
         case Undefined:
@@ -597,13 +586,13 @@ namespace mongo {
     double Value::coerceToDouble() const {
         switch(type) {
         case NumberDouble:
-            return simple.doubleValue;
+            return doubleValue;
 
         case NumberInt:
-            return (double)simple.intValue;
+            return (double)intValue;
 
         case NumberLong:
-            return (double)simple.longValue;
+            return (double)longValue;
 
         case jstNULL:
         case Undefined:
@@ -620,14 +609,14 @@ namespace mongo {
         return (double)0;
     }
 
-    Date_t Value::coerceToDate() const {
+    long long Value::coerceToDate() const {
         switch(type) {
 
         case Date:
             return dateValue; 
 
         case Timestamp:
-            return Date_t(timestampValue.getSecs() * 1000ULL);
+            return getTimestamp().getSecs() * 1000LL;
 
         default:
             uassert(16006, str::stream() <<
@@ -636,30 +625,81 @@ namespace mongo {
         } // switch(type)
     }
 
+    time_t Value::coerceToTimeT() const {
+        long long millis = coerceToDate();
+        if (millis < 0) {
+            // We want the division below to truncate toward -inf rather than 0
+            // eg Dec 31, 1969 23:59:58.001 should be -2 seconds rather than -1
+            // This is needed to get the correct values from coerceToTM
+            if ( -1999 / 1000 != -2) { // this is implementation defined
+                millis -= 1000-1;
+            }
+        }
+        const long long seconds = millis / 1000;
+
+        uassert(16421, "Can't handle date values outside of time_t range",
+               seconds >= std::numeric_limits<time_t>::min() &&
+               seconds <= std::numeric_limits<time_t>::max());
+
+        return static_cast<time_t>(seconds);
+    }
+    tm Value::coerceToTm() const {
+        // See implementation in Date_t.
+        // Can't reuse that here because it doesn't support times before 1970
+        time_t dtime = coerceToTimeT();
+        tm out;
+
+#if defined(_WIN32) // Both the argument order and the return values differ
+        bool itWorked = gmtime_s(&out, &dtime) == 0;
+#else
+        bool itWorked = gmtime_r(&dtime, &out) != NULL;
+#endif
+
+        if (!itWorked) {
+            if (dtime < 0) {
+                // Windows docs say it doesn't support these, but empirically it seems to work
+                uasserted(16422, "gmtime failed - your system doesn't support dates before 1970");
+            }
+            else {
+                uasserted(16423, str::stream() << "gmtime failed to convert time_t of " << dtime);
+            }
+        }
+
+        return out;
+    }
+
+    static string tmToISODateString(const tm& time) {
+        char buf[128];
+        size_t len = strftime(buf, 128, "%Y-%m-%dT%H:%M:%S", &time);
+        verify(len > 0);
+        verify(len < 128);
+        return buf;
+    }
+
     string Value::coerceToString() const {
         stringstream ss;
         switch(type) {
         case NumberDouble:
-            ss << simple.doubleValue;
+            ss << doubleValue;
             return ss.str();
 
         case NumberInt:
-            ss << simple.intValue;
+            ss << intValue;
             return ss.str();
 
         case NumberLong:
-            ss << simple.longValue;
+            ss << longValue;
             return ss.str();
 
         case String:
             return stringValue;
 
         case Timestamp:
-            ss << timestampValue.toStringPretty();
+            ss << getTimestamp().toStringPretty();
             return ss.str();
 
         case Date:
-            return dateValue.toString();
+            return tmToISODateString(coerceToTm());
 
         case jstNULL:
         case Undefined:
@@ -826,24 +866,22 @@ namespace mongo {
             break;
 
         case jstOID:
-            if (rL->oidValue < rR->oidValue)
+            if (rL->getOid() < rR->getOid())
                 return -1;
-            if (rL->oidValue == rR->oidValue)
+            if (rL->getOid() == rR->getOid())
                 return 0;
             return 1;
 
         case Bool:
-            if (rL->simple.boolValue == rR->simple.boolValue)
+            if (rL->boolValue == rR->boolValue)
                 return 0;
-            if (rL->simple.boolValue)
+            if (rL->boolValue)
                 return 1;
             return -1;
 
         case Date: {
-            // need to convert to long long to handle dates before 1970
-            // see BSONElement::compareElementValues
-            long long l = static_cast<long long>(rL->dateValue.millis);
-            long long r = static_cast<long long>(rR->dateValue.millis);
+            long long l = rL->dateValue;
+            long long r = rR->dateValue;
             if (l < r)
                 return -1;
             if (l > r)
@@ -928,15 +966,15 @@ namespace mongo {
             break;
 
         case jstOID:
-            oidValue.hash_combine(seed);
+            getOid().hash_combine(seed);
             break;
 
         case Bool:
-            boost::hash_combine(seed, simple.boolValue);
+            boost::hash_combine(seed, boolValue);
             break;
 
         case Date:
-            boost::hash_combine(seed, (unsigned long long)dateValue);
+            boost::hash_combine(seed, dateValue);
             break;
 
         case RegEx:
@@ -944,7 +982,7 @@ namespace mongo {
             break;
 
         case Timestamp:
-            boost::hash_combine(seed, timestampValue.asLL());
+            boost::hash_combine(seed, timestampValue);
             break;
 
         case Undefined:
@@ -1024,7 +1062,7 @@ namespace mongo {
             }
         }
 
-        /* NOTREACHED */
+        // Reachable, but callers must subsequently err out in this case.
         return Undefined;
     }
 

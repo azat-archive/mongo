@@ -24,7 +24,7 @@
 
 #pragma once
 
-#include "../pch.h"
+#include "mongo/pch.h"
 #include "security.h"
 #include "namespace-inl.h"
 #include "lasterror.h"
@@ -63,8 +63,8 @@ namespace mongo {
         static int getActiveClientCount( int& writers , int& readers );
         class Context;
         ~Client();
-        static int recommendedYieldMicros( int * writers = 0 , int * readers = 0 );
-
+        static int recommendedYieldMicros( int * writers = 0 , int * readers = 0,
+                                           bool needExact = false );
         /** each thread which does db operations has a Client object in TLS.
          *  call this when your thread starts.
         */

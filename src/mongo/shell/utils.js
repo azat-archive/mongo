@@ -1137,14 +1137,18 @@ jsTest.addAuth = function(conn) {
         localconn = new Mongo(hosts.join(','));
     }
     print ("Adding admin user on connection: " + localconn);
-    return localconn.getDB('admin').addUser(jsTestOptions().adminUser, jsTestOptions().adminPassword);
+    return localconn.getDB('admin').addUser(jsTestOptions().adminUser, jsTestOptions().adminPassword,
+                                            false, 'majority', 60000);
 }
 
 jsTest.authenticate = function(conn) {
+    // Set authenticated to stop an infinite recursion from getDB calling back into authenticate
     conn.authenticated = true;
     if (jsTest.options().auth || jsTest.options().keyFile) {
         print ("Authenticating to admin user on connection: " + conn);
-        return conn.getDB('admin').auth(jsTestOptions().adminUser, jsTestOptions().adminPassword);
+        conn.authenticated = conn.getDB('admin').auth(jsTestOptions().adminUser,
+                                                      jsTestOptions().adminPassword);
+        return conn.authenticated;
     }
 }
 

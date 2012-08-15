@@ -199,6 +199,7 @@
       <TargetMachine>MachineX86</TargetMachine>
       <IgnoreSpecificDefaultLibraries>msvcrtd;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <IgnoreAllDefaultLibraries>false</IgnoreAllDefaultLibraries>
+      <LargeAddressAware>true</LargeAddressAware>
     </Link>
     <PreBuildEvent>
       <Command>"$(ProjectDir)..\..\third_party\js-1.7\jskwgen.exe" "$(ProjectDir)..\..\third_party\js-1.7\jsautokw.h"
@@ -230,6 +231,7 @@ cscript //Nologo ..\shell\createCPPfromJavaScriptFiles.js "$(ProjectDir).."
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Console</SubSystem>
       <TargetMachine>MachineX86</TargetMachine>
+      <LargeAddressAware>true</LargeAddressAware>
     </Link>
     <PreBuildEvent>
       <Command>"$(ProjectDir)..\..\third_party\js-1.7\jskwgen.exe" "$(ProjectDir)..\..\third_party\js-1.7\jsautokw.h"
@@ -323,6 +325,7 @@ cscript //Nologo ..\shell\createCPPfromJavaScriptFiles.js "$(ProjectDir).."
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <TargetMachine>MachineX86</TargetMachine>
       <IgnoreAllDefaultLibraries>false</IgnoreAllDefaultLibraries>
+      <LargeAddressAware>true</LargeAddressAware>
     </Link>
     <PreBuildEvent>
       <Command>"$(ProjectDir)..\..\third_party\js-1.7\jskwgen.exe" "$(ProjectDir)..\..\third_party\js-1.7\jsautokw.h"
@@ -356,6 +359,7 @@ cscript //Nologo ..\shell\createCPPfromJavaScriptFiles.js "$(ProjectDir).."
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <TargetMachine>MachineX86</TargetMachine>
       <IgnoreAllDefaultLibraries>false</IgnoreAllDefaultLibraries>
+      <LargeAddressAware>true</LargeAddressAware>
     </Link>
     <PreBuildEvent>
       <Command>"$(ProjectDir)..\..\third_party\js-1.7\jskwgen.exe" "$(ProjectDir)..\..\third_party\js-1.7\jsautokw.h"
@@ -1011,7 +1015,6 @@ cscript //Nologo ..\shell\createCPPfromJavaScriptFiles.js "$(ProjectDir).."
     </ClCompile>
     <ClCompile Include="..\bson\oid.cpp" />
     <ClCompile Include="..\client\authentication_table.cpp" />
-    <ClCompile Include="..\client\connection_factory.cpp" />
     <ClCompile Include="..\client\dbclientcursor.cpp" />
     <ClCompile Include="..\client\dbclient_rs.cpp" />
     <ClCompile Include="..\client\distlock.cpp" />
@@ -1077,8 +1080,6 @@ cscript //Nologo ..\shell\createCPPfromJavaScriptFiles.js "$(ProjectDir).."
     <ClCompile Include="..\util\file_allocator.cpp" />
     <ClCompile Include="..\util\histogram.cpp" />
     <ClCompile Include="..\util\intrusive_counter.cpp" />
-    <ClCompile Include="..\util\hook_win32.cpp" />
-    <ClCompile Include="..\util\hook_windows_memory.cpp" />
     <ClCompile Include="..\util\log.cpp" />
     <ClCompile Include="..\util\logfile.cpp" />
     <ClCompile Include="..\util\net\listen.cpp" />
@@ -1100,9 +1101,8 @@ cscript //Nologo ..\shell\createCPPfromJavaScriptFiles.js "$(ProjectDir).."
     <ClCompile Include="..\util\version.cpp" />
     <ClCompile Include="btreebuilder.cpp" />
     <ClCompile Include="cap.cpp" />
-    <ClCompile Include="commands\cloud.cpp" />
     <ClCompile Include="commands\distinct.cpp" />
-    <ClCompile Include="commands\document_source_cursor.cpp" />
+    <ClCompile Include="pipeline\document_source_cursor.cpp" />
     <ClCompile Include="commands\find_and_modify.cpp" />
     <ClCompile Include="commands\fsync.cpp" />
     <ClCompile Include="commands\group.cpp" />
@@ -1110,10 +1110,11 @@ cscript //Nologo ..\shell\createCPPfromJavaScriptFiles.js "$(ProjectDir).."
     <ClCompile Include="commands\isself.cpp" />
     <ClCompile Include="commands\mr.cpp" />
     <ClCompile Include="commands\pipeline_command.cpp" />
-    <ClCompile Include="commands\pipeline.cpp" />
-    <ClCompile Include="commands\pipeline_d.cpp" />
+    <ClCompile Include="pipeline\pipeline.cpp" />
+    <ClCompile Include="pipeline\pipeline_d.cpp" />
     <ClCompile Include="commands\touch.cpp" />
     <ClCompile Include="compact.cpp" />
+    <ClCompile Include="connection_factory.cpp" />
     <ClCompile Include="curop.cpp" />
     <ClCompile Include="dbcommands_generic.cpp" />
     <ClCompile Include="dbmessage.cpp" />
@@ -1156,11 +1157,10 @@ cscript //Nologo ..\shell\createCPPfromJavaScriptFiles.js "$(ProjectDir).."
     <ClCompile Include="pipeline\accumulator_single_value.cpp" />
     <ClCompile Include="pipeline\accumulator_sum.cpp" />
     <ClCompile Include="pipeline\builder.cpp" />
-    <ClCompile Include="pipeline\dependency_tracker.cpp" />
     <ClCompile Include="pipeline\document.cpp" />
     <ClCompile Include="pipeline\document_source.cpp" />
     <ClCompile Include="pipeline\document_source_bson_array.cpp" />
-    <ClCompile Include="pipeline\document_source_command_futures.cpp" />
+    <ClCompile Include="pipeline\document_source_command_shards.cpp" />
     <ClCompile Include="pipeline\document_source_filter.cpp" />
     <ClCompile Include="pipeline\document_source_filter_base.cpp" />
     <ClCompile Include="pipeline\document_source_group.cpp" />
@@ -1243,10 +1243,7 @@ cscript //Nologo ..\shell\createCPPfromJavaScriptFiles.js "$(ProjectDir).."
     <ClInclude Include="..\util\concurrency\mutexdebugger.h" />
     <ClInclude Include="..\util\concurrency\simplerwlock.h" />
     <ClInclude Include="..\util\histogram.h" />
-    <ClInclude Include="..\util\hook_win32.h" />
-    <ClInclude Include="..\util\hook_windows_memory.h" />
     <ClInclude Include="..\util\progress_meter.h" />
-    <ClInclude Include="..\util\concurrency\remap_lock.h" />
     <ClInclude Include="..\util\signal_handlers.h" />
     <ClInclude Include="..\util\stacktrace.h" />
     <ClInclude Include="..\util\stack_introspect.h" />
@@ -1412,8 +1409,8 @@ cscript //Nologo ..\shell\createCPPfromJavaScriptFiles.js "$(ProjectDir).."
     <ClInclude Include="..\util\text.h" />
     <ClInclude Include="..\util\time_support.h" />
     <ClInclude Include="..\util\trace.h" />
-    <ClInclude Include="commands\pipeline.h" />
-    <ClInclude Include="commands\pipeline_d.h" />
+    <ClInclude Include="pipeline\pipeline.h" />
+    <ClInclude Include="pipeline\pipeline_d.h" />
     <ClInclude Include="databaseholder.h" />
     <ClInclude Include="durop.h" />
     <ClInclude Include="dur_commitjob.h" />
@@ -1440,7 +1437,6 @@ cscript //Nologo ..\shell\createCPPfromJavaScriptFiles.js "$(ProjectDir).."
     <ClInclude Include="pagefault.h" />
     <ClInclude Include="pipeline\accumulator.h" />
     <ClInclude Include="pipeline\builder.h" />
-    <ClInclude Include="pipeline\dependency_tracker.h" />
     <ClInclude Include="pipeline\document.h" />
     <ClInclude Include="pipeline\document_source.h" />
     <ClInclude Include="pipeline\doc_mem_monitor.h" />
@@ -1451,7 +1447,6 @@ cscript //Nologo ..\shell\createCPPfromJavaScriptFiles.js "$(ProjectDir).."
     <ClInclude Include="projection.h" />
     <ClInclude Include="queryutil.h" />
     <ClInclude Include="repl.h" />
-    <ClInclude Include="replpair.h" />
     <ClInclude Include="repl\connections.h" />
     <ClInclude Include="repl\multicmd.h" />
     <ClInclude Include="repl\rsmember.h" />
@@ -1471,13 +1466,11 @@ cscript //Nologo ..\shell\createCPPfromJavaScriptFiles.js "$(ProjectDir).."
     <ClInclude Include="clientcursor.h" />
     <ClInclude Include="cmdline.h" />
     <ClInclude Include="commands.h" />
-    <ClInclude Include="concurrency.h" />
     <ClInclude Include="curop.h" />
     <ClInclude Include="cursor.h" />
     <ClInclude Include="database.h" />
     <ClInclude Include="db.h" />
     <ClInclude Include="dbhelpers.h" />
-    <ClInclude Include="dbinfo.h" />
     <ClInclude Include="dbmessage.h" />
     <ClInclude Include="diskloc.h" />
     <ClInclude Include="index.h" />
@@ -1488,7 +1481,6 @@ cscript //Nologo ..\shell\createCPPfromJavaScriptFiles.js "$(ProjectDir).."
     <ClInclude Include="namespace.h" />
     <ClInclude Include="..\pch.h" />
     <ClInclude Include="pdfile.h" />
-    <ClInclude Include="query.h" />
     <ClInclude Include="queryoptimizer.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="scanandorder.h" />
@@ -1532,7 +1524,6 @@ cscript //Nologo ..\shell\createCPPfromJavaScriptFiles.js "$(ProjectDir).."
     <ClInclude Include="repl\rs.h" />
     <ClInclude Include="repl\rs_config.h" />
     <ClInclude Include="..\bson\bsonelement.h" />
-    <ClInclude Include="..\bson\bsoninlines.h" />
     <ClInclude Include="..\bson\bsonmisc.h" />
     <ClInclude Include="..\bson\bsonobj.h" />
     <ClInclude Include="..\bson\bsonobjbuilder.h" />

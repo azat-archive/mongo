@@ -136,8 +136,13 @@ namespace mongo {
         _prev = temp;
     }
 
-    bool ClientInfo::getLastError( const string& dbName, const BSONObj& options ,
-                                   BSONObjBuilder& result , bool fromWriteBackListener ) {
+    bool ClientInfo::getLastError( const string& dbName,
+                                   const BSONObj& options,
+                                   BSONObjBuilder& result,
+                                   string& errmsg,
+                                   bool fromWriteBackListener)
+    {
+
         set<string> * shards = getPrev();
 
         if ( shards->size() == 0 ) {
@@ -147,22 +152,31 @@ namespace mongo {
 
         vector<WBInfo> writebacks;
 
+        //
+        // TODO: These branches should be collapsed into a single codepath
+        //
+
         // handle single server
         if ( shards->size() == 1 ) {
             string theShard = *(shards->begin() );
 
-
-
             BSONObj res;
             bool ok = false;
             {
+                LOG(5) << "gathering response for gle from: " << theShard << endl;
+
                 ShardConnection conn( theShard , "" );
                 try {
                     ok = conn->runCommand( dbName , options , res );
                 }
                 catch( std::exception &e ) {
 
-                    warning() << "could not get last error from shard " << theShard << causedBy( e ) << endl;
+                    string message =
+                            str::stream() << "could not get last error from shard " << theShard
+                                          << causedBy( e );
+
+                    warning() << message << endl;
+                    errmsg = message;
 
                     // Catch everything that happens here, since we need to ensure we return our connection when we're
                     // finished.
@@ -178,11 +192,16 @@ namespace mongo {
 
             _addWriteBack( writebacks , res );
 
+            LOG(4) << "gathering writebacks from " << sinceLastGetError().size() << " hosts for"
+                   << " gle (" << theShard << ")" << endl;
+
             // hit other machines just to block
             for ( set<string>::const_iterator i=sinceLastGetError().begin(); i!=sinceLastGetError().end(); ++i ) {
                 string temp = *i;
                 if ( temp == theShard )
                     continue;
+
+                LOG(5) << "gathering writebacks for single-shard gle from: " << temp << endl;
 
                 try {
                     ShardConnection conn( temp , "" );
@@ -196,6 +215,9 @@ namespace mongo {
 
             }
             clearSinceLastGetError();
+
+            LOG(4) << "checking " << writebacks.size() << " writebacks for"
+                   << " gle (" << theShard << ")" << endl;
 
             if ( writebacks.size() ){
                 vector<BSONObj> v = _handleWriteBacks( writebacks , fromWriteBackListener );
@@ -237,6 +259,9 @@ namespace mongo {
         for ( set<string>::iterator i = shards->begin(); i != shards->end(); i++ ) {
             string theShard = *i;
             bbb.append( theShard );
+
+            LOG(5) << "gathering a response for gle from: " << theShard << endl;
+
             boost::scoped_ptr<ShardConnection> conn;
             BSONObj res;
             bool ok = false;
@@ -247,11 +272,18 @@ namespace mongo {
             }
             catch( std::exception &e ){
 
-              // Safe to return here, since we haven't started any extra processing yet, just collecting
-              // responses.
+                // Safe to return here, since we haven't started any extra processing yet, just collecting
+                // responses.
 
-              warning() << "could not get last error from a shard " << theShard << causedBy( e ) << endl;
-                conn->done();
+                string message =
+                        str::stream() << "could not get last error from a shard " << theShard
+                                      << causedBy( e );
+
+                warning() << message << endl;
+                errmsg = message;
+
+                if (conn)
+                    conn->done();
 
                 return false;
             }
@@ -282,11 +314,16 @@ namespace mongo {
         if ( updatedExistingStat )
             result.appendBool( "updatedExisting" , updatedExistingStat > 0 );
 
+        LOG(4) << "gathering writebacks from " << sinceLastGetError().size() << " hosts for"
+               << " gle (" << shards->size() << " shards)" << endl;
+
         // hit other machines just to block
         for ( set<string>::const_iterator i=sinceLastGetError().begin(); i!=sinceLastGetError().end(); ++i ) {
             string temp = *i;
             if ( shards->count( temp ) )
                 continue;
+
+            LOG(5) << "gathering writebacks for multi-shard gle from: " << temp << endl;
 
             ShardConnection conn( temp , "" );
             try {
@@ -298,6 +335,9 @@ namespace mongo {
             conn.done();
         }
         clearSinceLastGetError();
+
+        LOG(4) << "checking " << writebacks.size() << " writebacks for"
+                << " gle (" << shards->size() << " shards)" << endl;
 
         if ( errors.size() == 0 ) {
             result.appendNull( "err" );
@@ -324,6 +364,7 @@ namespace mongo {
             }
             all.done();
         }
+
         _handleWriteBacks( writebacks , fromWriteBackListener );
         return true;
     }

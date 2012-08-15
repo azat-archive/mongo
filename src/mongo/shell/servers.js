@@ -290,6 +290,11 @@ MongoRunner.arrToOpts = function( arr ){
 MongoRunner.savedOptions = {}
 
 MongoRunner.mongoOptions = function( opts ){
+   
+    // If we're a mongo object
+    if( opts.getDB ){
+        opts = { restart : opts.runId }
+    }
     
     // Initialize and create a copy of the opts
     opts = Object.merge( opts || {}, {} )
@@ -297,7 +302,13 @@ MongoRunner.mongoOptions = function( opts ){
     if( ! opts.restart ) opts.restart = false
     
     // RunId can come from a number of places
-    if( isObject( opts.restart ) ){
+    // If restart is passed as an old connection
+    if( opts.restart && opts.restart.getDB ){
+        opts.runId = opts.restart.runId
+        opts.restart = true
+    }
+    // If it's the runId itself
+    else if( isObject( opts.restart ) ){
         opts.runId = opts.restart
         opts.restart = true
     }
@@ -658,11 +669,29 @@ startMongoProgram = function(){
     return m;
 }
 
+runMongoProgram = function() {
+    var args = argumentsToArray( arguments );
+    if ( jsTestOptions().auth ) {
+        var progName = args[0];
+        args = args.slice(1);
+        args.unshift( progName, '-u', jsTestOptions().adminUser,
+                      '-p', jsTestOptions().adminPassword );
+    }
+    return _runMongoProgram.apply( null, args );
+}
+
 // Start a mongo program instance.  This function's first argument is the
 // program name, and subsequent arguments to this function are passed as
 // command line arguments to the program.  Returns pid of the spawned program.
 startMongoProgramNoConnect = function() {
-    return _startMongoProgram.apply( null, arguments );
+    var args = argumentsToArray( arguments );
+    if ( jsTestOptions().auth ) {
+        var progName = args[0];
+        args = args.slice(1);
+        args.unshift( progName, '-u', jsTestOptions().adminUser,
+                      '-p', jsTestOptions().adminPassword );
+    }
+    return _startMongoProgram.apply( null, args );
 }
 
 myPort = function() {

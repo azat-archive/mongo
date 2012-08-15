@@ -17,7 +17,7 @@
 
 #pragma once
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include <boost/function.hpp>
 #include <boost/shared_ptr.hpp>
@@ -99,6 +99,11 @@ namespace mongo {
             }
 
             /**
+             * Checks whether this nodes is compatible with the given readPreference and
+             * tag. Compatibility check is strict in the sense that secondary preferred
+             * is treated like secondary only and primary preferred is treated like
+             * primary only.
+             *
              * @return true if this node is compatible with the read preference and tags.
              */
             bool isCompatible(ReadPreference readPreference, const TagSet* tag) const;
@@ -142,8 +147,6 @@ namespace mongo {
          *     robin, starting from the node next to this lastHost. This will be overwritten
          *     with the newly chosen host if not empty, not primary and when preference
          *     is not Nearest.
-         * @param tryRefreshing an out parameter for notifying the caller that it needs
-         *     to refresh the view of the nodes.
          *
          * @return the host object of the node selected. If none of the nodes are
          *     eligible, returns an empty host.
@@ -152,8 +155,7 @@ namespace mongo {
                                       ReadPreference preference,
                                       TagSet* tags,
                                       int localThresholdMillis,
-                                      HostAndPort* lastHost,
-                                      bool* tryRefreshing);
+                                      HostAndPort* lastHost);
 
         /**
          * Selects the right node given the nodes to pick from and the preference. This
@@ -507,7 +509,10 @@ namespace mongo {
          * @param tags pointer to the list of tags.
          *
          * @return a pointer to the new connection object if it can find a good connection.
-         *      Otherwise it returns NULL.
+         *     Otherwise it returns NULL.
+         *
+         * @throws DBException when an error occurred either when trying to connect to
+         *     a node that was thought to be ok or when an assertion happened.
          */
         DBClientConnection* selectNodeUsingTags(ReadPreference preference,
                                                 TagSet* tags);
@@ -517,6 +522,11 @@ namespace mongo {
          * set and can be used for the given read preference.
          */
         bool checkLastHost( ReadPreference preference, const TagSet* tags );
+
+        /**
+         * Destroys all cached information about the last slaveOk operation.
+         */
+        void invalidateLastSlaveOkCache();
 
         void _auth( DBClientConnection * conn );
 

@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include "pch.h"
+#include "mongo/pch.h"
 #include "bson/bsontypes.h"
 #include "bson/oid.h"
 #include "util/intrusive_counter.h"
@@ -81,6 +81,17 @@ namespace mongo {
         static intrusive_ptr<const Value> createInt(int value);
 
         /*
+          Construct a long or interger-valued Value.
+          Used when preforming arithmetic operations with int where the result may be too large
+          and need to be stored as long. The Value will be an int if value fits, otherwise it
+          will be a long.
+
+          @param value the value
+          @returns a Value with the given value
+        */
+        static intrusive_ptr<const Value> createIntOrLong(long long value);
+
+        /*
           Construct an long(long)-valued Value.
 
           For commonly used values, consider using one of the singleton
@@ -113,7 +124,7 @@ namespace mongo {
           @param value the value
           @returns a Value with the given value
         */
-        static intrusive_ptr<const Value> createDate(const Date_t &value);
+        static intrusive_ptr<const Value> createDate(const long long &value);
 
         static intrusive_ptr<const Value> createTimestamp(const OpTime& value);
 
@@ -156,7 +167,7 @@ namespace mongo {
         intrusive_ptr<ValueIterator> getArray() const;
         OID getOid() const;
         bool getBool() const;
-        Date_t getDate() const;
+        long long getDate() const;
         OpTime getTimestamp() const;
         string getRegex() const;
         string getSymbol() const;
@@ -227,7 +238,9 @@ namespace mongo {
 
           @returns the date value
         */
-        Date_t coerceToDate() const;
+        long long coerceToDate() const;
+        time_t coerceToTimeT() const;
+        tm coerceToTm() const; // broken-out time struct (see man gmtime)
 
         OpTime coerceToTimestamp() const;
 
@@ -303,7 +316,6 @@ namespace mongo {
 
         Value(long long longValue);
         Value(double doubleValue);
-        Value(const Date_t &dateValue);
         Value(const OpTime& timestampValue);
         Value(const string &stringValue);
         Value(const intrusive_ptr<Document> &pDocument);
@@ -313,20 +325,21 @@ namespace mongo {
 
         BSONType type;
 
-        /* store value in one of these */
+        // store values that don't need a ctor/dtor in one of these
         union {
             double doubleValue;
             bool boolValue;
             int intValue;
             long long longValue;
-        } simple; // values that don't need a ctor/dtor
-        OID oidValue;
-        Date_t dateValue;
+            ReplTime timestampValue;
+            unsigned char oidValue[12];
+            // The member below is redundant, but useful for clarity and searchability.
+            long long dateValue;
+        };
+
         string stringValue; // String, Regex, Symbol
-        OpTime timestampValue;
         intrusive_ptr<Document> pDocumentValue;
         vector<intrusive_ptr<const Value> > vpValue; // for arrays
-
 
         /*
         These are often used as the result of boolean or comparison

@@ -59,7 +59,7 @@ DB.prototype.adminCommand = function( obj ){
 
 DB.prototype._adminCommand = DB.prototype.adminCommand; // alias old name
 
-DB.prototype.addUser = function( username , pass, readOnly, replicatedTo ){
+DB.prototype.addUser = function( username , pass, readOnly, replicatedTo, timeout ){
     if ( pass == null || pass.length == 0 )
         throw "password can't be empty";
 
@@ -96,7 +96,7 @@ DB.prototype.addUser = function( username , pass, readOnly, replicatedTo ){
     // in mongod version 2.1.0-, this worked
     var le = {};
     try {        
-        le = this.getLastErrorObj( replicatedTo, 30 * 1000 );
+        le = this.getLastErrorObj( replicatedTo, timeout || 30 * 1000 );
         // printjson( le )
     }
     catch (e) {
@@ -919,8 +919,8 @@ DB.prototype.getSlaveOk = function() {
     return this._mongo.getSlaveOk();
 }
 
-/* Loads any scripts contained in db.system.js into the client shell.
+/* Loads any scripts contained in system.js into the client shell.
 */
 DB.prototype.loadServerScripts = function(){
-    db.system.js.find().forEach(function(u){eval(u._id + " = " + u.value);});
+    this.system.js.find().forEach(function(u){eval(u._id + " = " + u.value);});
 }
