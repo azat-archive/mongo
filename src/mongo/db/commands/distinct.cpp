@@ -112,7 +112,7 @@ namespace mongo {
                         if ( values.count( e ) )
                             continue;
 
-                        int now = bb.len();
+                        unsigned int now = bb.len();
 
                         uassert(10044,  "distinct too big, 16mb cap", ( now + e.size() + 1024 ) < bufSize );
 
