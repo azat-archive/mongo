@@ -526,14 +526,24 @@ namespace mongo {
     }
 
     void ExpressionCoerceToBool::addToBsonObj(
-        BSONObjBuilder *pBuilder, string fieldName,
-        bool requireExpression) const {
-        verify(false && "not possible"); // no equivalent of this
+            BSONObjBuilder *pBuilder, string fieldName,
+            bool requireExpression) const {
+        // Serializing as an $and expression which will become a CoerceToBool
+        BSONObjBuilder sub (pBuilder->subobjStart(fieldName));
+        BSONArrayBuilder arr (sub.subarrayStart("$and"));
+        pExpression->addToBsonArray(&arr);
+        arr.doneFast();
+        sub.doneFast();
     }
 
     void ExpressionCoerceToBool::addToBsonArray(
-        BSONArrayBuilder *pBuilder) const {
-        verify(false && "not possible"); // no equivalent of this
+            BSONArrayBuilder *pBuilder) const {
+        // Serializing as an $and expression which will become a CoerceToBool
+        BSONObjBuilder sub (pBuilder->subobjStart());
+        BSONArrayBuilder arr (sub.subarrayStart("$and"));
+        pExpression->addToBsonArray(&arr);
+        arr.doneFast();
+        sub.doneFast();
     }
 
     /* ----------------------- ExpressionCompare --------------------------- */
@@ -606,10 +616,10 @@ namespace mongo {
         /*             -1      0      1      reverse          name   */
         /* EQ  */ { { false, true,  false }, Expression::EQ,  "$eq"  },
         /* NE  */ { { true,  false, true },  Expression::NE,  "$ne"  },
-        /* GT  */ { { false, false, true },  Expression::LTE, "$gt"  },
-        /* GTE */ { { false, true,  true },  Expression::LT,  "$gte" },
-        /* LT  */ { { true,  false, false }, Expression::GTE, "$lt"  },
-        /* LTE */ { { true,  true,  false }, Expression::GT,  "$lte" },
+        /* GT  */ { { false, false, true },  Expression::LT,  "$gt"  },
+        /* GTE */ { { false, true,  true },  Expression::LTE, "$gte" },
+        /* LT  */ { { true,  false, false }, Expression::GT,  "$lt"  },
+        /* LTE */ { { true,  true,  false }, Expression::GTE, "$lte" },
         /* CMP */ { { false, false, false }, Expression::CMP, "$cmp" },
     };
 
