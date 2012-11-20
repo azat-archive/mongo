@@ -25,16 +25,16 @@
 #pragma once
 
 #include "mongo/pch.h"
-#include "security.h"
-#include "namespace-inl.h"
-#include "lasterror.h"
-#include "stats/top.h"
-#include "../db/client_common.h"
-#include "../util/concurrency/threadlocal.h"
-#include "../util/net/message_port.h"
-#include "../util/concurrency/rwlock.h"
-#include "d_concurrency.h"
+
+#include "mongo/db/client_common.h"
+#include "mongo/db/d_concurrency.h"
+#include "mongo/db/lasterror.h"
 #include "mongo/db/lockstate.h"
+#include "mongo/db/namespace-inl.h"
+#include "mongo/db/security.h"
+#include "mongo/db/stats/top.h"
+#include "mongo/util/concurrency/rwlock.h"
+#include "mongo/util/concurrency/threadlocal.h"
 #include "mongo/util/paths.h"
 
 namespace mongo {
@@ -55,7 +55,6 @@ namespace mongo {
 
     /** the database's concept of an outside "client" */
     class Client : public ClientBasic {
-        static Client *syncThread;
     public:
         // always be in clientsMutex when manipulating this. killop stuff uses these.
         static set<Client*>& clients;
@@ -81,14 +80,6 @@ namespace mongo {
          */
         bool shutdown();
 
-        /** set so isSyncThread() works */
-        void iAmSyncThread() {
-            wassert( syncThread == 0 );
-            syncThread = this;
-        }
-        /** @return true if this client is the replication secondary pull thread.  not used much, is used in create index sync code. */
-        bool isSyncThread() const { return this == syncThread; }
-
         string clientAddress(bool includePort=false) const;
         const AuthenticationInfo * getAuthenticationInfo() const { return &_ai; }
         AuthenticationInfo * getAuthenticationInfo() { return &_ai; }
@@ -110,11 +101,8 @@ namespace mongo {
         bool isGod() const { return _god; } /* this is for map/reduce writes */
         string toString() const;
         void gotHandshake( const BSONObj& o );
-        bool hasRemote() const { return _mp; }
-        HostAndPort getRemote() const { verify( _mp ); return _mp->remote(); }
         BSONObj getRemoteID() const { return _remoteId; }
         BSONObj getHandshake() const { return _handshake; }
-        AbstractMessagingPort * port() const { return _mp; }
         ConnectionId getConnectionId() const { return _connectionId; }
 
         bool inPageFaultRetryableSection() const { return _pageFaultRetryableSection != 0; }
@@ -142,7 +130,6 @@ namespace mongo {
         OpTime _lastOp;
         BSONObj _handshake;
         BSONObj _remoteId;
-        AbstractMessagingPort * const _mp;
 
         bool _hasWrittenThisPass;
         PageFaultRetryableSection *_pageFaultRetryableSection;
@@ -168,7 +155,7 @@ namespace mongo {
          */
         class ReadContext : boost::noncopyable { 
         public:
-            ReadContext(const string& ns, string path=dbpath, bool doauth=true );
+            ReadContext(const std::string& ns, const std::string& path=dbpath, bool doauth=true );
             Context& ctx() { return *c.get(); }
         private:
             scoped_ptr<Lock::DBRead> lk;
@@ -181,13 +168,13 @@ namespace mongo {
         class Context : boost::noncopyable {
         public:
             /** this is probably what you want */
-            Context(const string& ns, string path=dbpath, bool doauth=true, bool doVersion=true );
+            Context(const string& ns, const std::string& path=dbpath, bool doauth=true, bool doVersion=true );
 
             /** note: this does not call finishInit -- i.e., does not call 
                       shardVersionOk() for example. 
                 see also: reset().
             */
-            Context( string ns , Database * db, bool doauth=true );
+            Context( const std::string& ns , Database * db, bool doauth=true );
 
             // used by ReadContext
             Context(const string& path, const string& ns, Database *db, bool doauth);
@@ -237,7 +224,7 @@ namespace mongo {
 
         class WriteContext : boost::noncopyable {
         public:
-            WriteContext(const string& ns, string path=dbpath, bool doauth=true );
+            WriteContext(const string& ns, const std::string& path=dbpath, bool doauth=true );
             Context& ctx() { return _c; }
         private:
             Lock::DBWrite _lk;

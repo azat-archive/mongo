@@ -348,11 +348,55 @@ String.prototype.endsWith = function (str){
     return new RegExp( RegExp.escape(str) + "$" ).test( this )
 }
 
-Number.prototype.zeroPad = function(width) {
-    var str = this + '';
-    while (str.length < width)
-        str = '0' + str;
+// Returns a copy padded with the provided character _chr_ so it becomes (at least) _length_
+// characters long.
+// No truncation is performed if the string is already longer than _length_.
+// @param length minimum length of the returned string
+// @param right if falsy add leading whitespace, otherwise add trailing whitespace
+// @param chr character to be used for padding, defaults to whitespace
+// @return the padded string
+String.prototype.pad = function(length, right, chr) {
+    if (typeof chr == 'undefined') chr = ' ';
+    var str = this;
+    for (var i = length - str.length; i > 0; i--) {
+        if (right) {
+            str = str + chr;
+        } else {
+            str = chr + str;
+        }
+    }
     return str;
+}
+
+Number.prototype.toPercentStr = function() {
+    return (this * 100).toFixed(2) + "%";
+}
+
+Number.prototype.zeroPad = function(width) {
+    return ('' + this).pad(width, false, '0');
+}
+
+// Formats a simple stacked horizontal histogram bar in the shell.
+// @param data array of the form [[ratio, symbol], ...] where ratio is between 0 and 1 and
+//             symbol is a string of length 1
+// @param width width of the bar (excluding the left and right delimiters [ ] )
+// e.g. _barFormat([[.3, "="], [.5, '-']], 80) returns
+//      "[========================----------------------------------------                ]"
+_barFormat = function(data, width) {
+    var remaining = width;
+    var res = "[";
+    for (var i = 0; i < data.length; i++) {
+        for (var x = 0; x < data[i][0] * width; x++) {
+            if (remaining-- > 0) {
+                res += data[i][1];
+            }
+        }
+    }
+    while (remaining-- > 0) {
+        res += " ";
+    }
+    res += "]";
+    return res;
 }
 
 Date.timeFunc = function( theFunc , numTimes ){
@@ -1142,14 +1186,27 @@ jsTest.addAuth = function(conn) {
 }
 
 jsTest.authenticate = function(conn) {
-    // Set authenticated to stop an infinite recursion from getDB calling back into authenticate
-    conn.authenticated = true;
-    if (jsTest.options().auth || jsTest.options().keyFile) {
-        print ("Authenticating to admin user on connection: " + conn);
-        conn.authenticated = conn.getDB('admin').auth(jsTestOptions().adminUser,
-                                                      jsTestOptions().adminPassword);
-        return conn.authenticated;
+    if (!jsTest.options().auth && !jsTest.options().keyFile) {
+        conn.authenticated = true;
+        return true;
     }
+
+    try {
+        jsTest.attempt({timeout:5000, sleepTime:1000},
+                       function() {
+                           // Set authenticated to stop an infinite recursion from getDB calling
+                           // back into authenticate.
+                           conn.authenticated = true;
+                           print ("Authenticating to admin user on connection: " + conn);
+                           conn.authenticated = conn.getDB('admin').auth(
+                               jsTestOptions().adminUser, jsTestOptions().adminPassword);
+                           return conn.authenticated;
+                       });
+    } catch (e) {
+        print("Caught exception while authenticating connection: " + tojson(e));
+        conn.authenticated = false;
+    }
+    return conn.authenticated;
 }
 
 jsTest.authenticateNodes = function(nodes) {
@@ -1178,7 +1235,7 @@ jsTest.isMongos = function(conn) {
 jsTest.attempt = function( opts, func ) {
     var timeout = opts.timeout || 1000;
     var tries   = 0;
-    var sleepTime = 2000;
+    var sleepTime = opts.sleepTime || 2000;
     var result = null;
     var context = opts.context || this;
 
@@ -1273,7 +1330,7 @@ shellAutocomplete = function ( /*prefix*/ ) { // outer scope function called on 
     builtinMethods[Mongo] = "find update insert remove".split( ' ' );
     builtinMethods[BinData] = "hex base64 length subtype".split( ' ' );
 
-    var extraGlobals = "Infinity NaN undefined null true false decodeURI decodeURIComponent encodeURI encodeURIComponent escape eval isFinite isNaN parseFloat parseInt unescape Array Boolean Date Math Number RegExp String print load gc MinKey MaxKey Mongo NumberInt NumberLong ObjectId DBPointer UUID BinData HexData MD5 Map".split( ' ' );
+    var extraGlobals = "Infinity NaN undefined null true false decodeURI decodeURIComponent encodeURI encodeURIComponent escape eval isFinite isNaN parseFloat parseInt unescape Array Boolean Date Math Number RegExp String print load gc MinKey MaxKey Mongo NumberInt NumberLong ObjectId DBPointer UUID BinData HexData MD5 Map Timestamp".split( ' ' );
 
     var isPrivate = function( name ) {
         if ( shellAutocomplete.showPrivate ) return false;
@@ -1471,7 +1528,7 @@ shellHelper.show = function (what) {
         return "";
     }
 
-    if (what == "dbs") {
+    if (what == "dbs" || what == "databases") {
         var dbs = db.getMongo().getDBs();
         var size = {};
         dbs.databases.forEach(function (x) { size[x.name] = x.sizeOnDisk; });
@@ -1696,6 +1753,7 @@ rs.help = function () {
     print("\trs.slaveOk()                    shorthand for db.getMongo().setSlaveOk()");
     print();
     print("\tdb.isMaster()                   check who is primary");
+    print("\tdb.printReplicationInfo()       check oplog size and time range");
     print();
     print("\treconfiguration helpers disconnect from the database so the shell will display");
     print("\tan error, even if the command succeeds.");
@@ -1876,7 +1934,7 @@ help = shellHelper.help = function (x) {
         print();
         print("\to = new ObjectId()                  create a new ObjectId");
         print("\to.getTimestamp()                    return timestamp derived from first 32 bits of the OID");
-        print("\to.isObjectId()");
+        print("\to.isObjectId");
         print("\to.toString()");
         print("\to.equals(otherid)");
         print();

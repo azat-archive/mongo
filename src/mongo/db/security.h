@@ -20,7 +20,6 @@
 
 #include <string>
 
-#include "mongo/db/nonce.h"
 #include "mongo/db/security_common.h"
 #include "mongo/client/authentication_table.h"
 #include "mongo/client/authlevel.h"
@@ -44,6 +43,7 @@ namespace mongo {
         }
         ~AuthenticationInfo() {}
         bool isLocalHost() const { return _isLocalHost; } // why are you calling this? makes no sense to be externalized
+        bool isSpecialLocalhostAdmin() const;
 
         // -- modifiers ----
         

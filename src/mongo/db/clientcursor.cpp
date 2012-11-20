@@ -22,19 +22,25 @@
    Cursor -- and its derived classes -- are our internal cursors.
 */
 
-#include "pch.h"
-#include "clientcursor.h"
-#include "introspect.h"
+#include "mongo/pch.h"
+
+#include "mongo/db/clientcursor.h"
+
 #include <time.h>
-#include "db.h"
-#include "commands.h"
-#include "repl_block.h"
-#include "../util/processinfo.h"
-#include "../util/timer.h"
+
 #include "mongo/client/dbclientinterface.h"
-#include "mongo/db/scanandorder.h"
-#include "pagefault.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/commands/server_status.h"
+#include "mongo/db/db.h"
+#include "mongo/db/introspect.h"
+#include "mongo/db/kill_current_op.h"
+#include "mongo/db/pagefault.h"
 #include "mongo/db/repl/rs.h"
+#include "mongo/db/repl_block.h"
+#include "mongo/db/scanandorder.h"
+#include "mongo/platform/random.h"
+#include "mongo/util/processinfo.h"
+#include "mongo/util/timer.h"
 
 namespace mongo {
 
@@ -42,7 +48,7 @@ namespace mongo {
     boost::recursive_mutex& ClientCursor::ccmutex( *(new boost::recursive_mutex()) );
     long long ClientCursor::numberTimedOut = 0;
 
-    void aboutToDeleteForSharding( const Database* db , const DiskLoc& dl ); // from s/d_logic.h
+    void aboutToDeleteForSharding( const Database* db, const NamespaceDetails* nsd, const DiskLoc& dl ); // from s/d_logic.h
 
     /*static*/ void ClientCursor::assertNoCursors() {
         recursive_scoped_lock lock(ccmutex);
@@ -198,7 +204,7 @@ namespace mongo {
         Database *db = cc().database();
         CCByLoc& bl = db->ccByLoc;
         RARELY if ( bl.size() > 70 ) {
-            log() << "perf warning: byLoc.size=" << bl.size() << " in aboutToDeleteBucket\n";
+            log() << "perf warning: byLoc.size=" << bl.size() << " in aboutToDeleteBucket" << endl;
         }
         for ( CCByLoc::iterator i = bl.begin(); i != bl.end(); i++ )
             i->second->_c->aboutToDeleteBucket(b);
@@ -208,7 +214,7 @@ namespace mongo {
     }
 
     /* must call this on a delete so we clean up the cursors. */
-    void ClientCursor::aboutToDelete(const DiskLoc& dl) {
+    void ClientCursor::aboutToDelete(const NamespaceDetails* nsd, const DiskLoc& dl) {
         NoPageFaultsAllowed npfa;
 
         recursive_scoped_lock lock(ccmutex);
@@ -216,7 +222,7 @@ namespace mongo {
         Database *db = cc().database();
         verify(db);
 
-        aboutToDeleteForSharding( db , dl );
+        aboutToDeleteForSharding( db, nsd, dl );
 
         CCByLoc& bl = db->ccByLoc;
         CCByLoc::iterator j = bl.lower_bound(ByLocKey::min(dl));
@@ -290,7 +296,6 @@ namespace mongo {
             cc->updateLocation();
         }
     }
-    void aboutToDelete(const DiskLoc& dl) { ClientCursor::aboutToDelete(dl); }
 
     void ClientCursor::LockedIterator::deleteAndAdvance() {
         ClientCursor *cc = current();
@@ -423,6 +428,16 @@ namespace mongo {
         return b.obj();
     }
     
+    BSONObj ClientCursor::extractKey( const KeyPattern& usingKeyPattern ) const {
+        KeyPattern currentIndex( _c->indexKeyPattern() );
+        if ( usingKeyPattern.isCoveredBy( currentIndex ) && ! currentIndex.isSpecial() ){
+            BSONObj currKey = _c->currKey();
+            BSONObj prettyKey = currKey.replaceFieldNames( currentIndex.toBSON() );
+            return usingKeyPattern.extractSingleKey( prettyKey );
+        }
+        return usingKeyPattern.extractSingleKey( _c->current() );
+    }
+
     void ClientCursor::fillQueryResultFromObj( BufBuilder &b, const MatchDetails* details ) const {
         const Projection::KeyOnly *keyFieldsOnly = c()->keyFieldsOnly();
         if ( keyFieldsOnly ) {
@@ -445,7 +460,7 @@ namespace mongo {
         _c->prepareToYield();
         DiskLoc cl = _c->refLoc();
         if ( lastLoc() == cl ) {
-            //log() << "info: lastloc==curloc " << ns << '\n';
+            //log() << "info: lastloc==curloc " << ns << endl;
         }
         else {
             recursive_scoped_lock lock(ccmutex);
@@ -636,19 +651,39 @@ namespace mongo {
         return ClientCursor::recoverFromYield( data );
     }
 
-    // See SERVER-5726.
-    long long ctmLast = 0; // so we don't have to do find() which is a little slow very often.
+    namespace {
+        // so we don't have to do find() which is a little slow very often.
+        long long cursorGenTSLast = 0;
+        PseudoRandom* cursorGenRandom = NULL;
+    }
+
     long long ClientCursor::allocCursorId_inlock() {
-        long long ctm = curTimeMillis64();
-        dassert( ctm );
+
+        if ( ! cursorGenRandom ) {
+            scoped_ptr<SecureRandom> sr( SecureRandom::create() );
+            cursorGenRandom = new PseudoRandom( sr->nextInt64() );
+        }
+
+        const long long ts = Listener::getElapsedTimeMillis();
+
         long long x;
+
         while ( 1 ) {
-            x = (((long long)rand()) << 32);
-            x = x ^ ctm;
-            if ( ctm != ctmLast || ClientCursor::find_inlock(x, false) == 0 )
+            x = ts << 32;
+            x |= cursorGenRandom->nextInt32();
+
+            if ( x == 0 )
+                continue;
+
+            if ( x < 0 )
+                x *= -1;
+
+            if ( ts != cursorGenTSLast || ClientCursor::find_inlock(x, false) == 0 )
                 break;
         }
-        ctmLast = ctm;
+
+        cursorGenTSLast = ts;
+
         return x;
     }
 
@@ -707,6 +742,21 @@ namespace mongo {
         }
     } cmdCursorInfo;
 
+    class CursorServerStats : public ServerStatusSection {
+    public:
+
+        CursorServerStats() : ServerStatusSection( "cursors" ){}
+        virtual bool includeByDefault() const { return true; }
+        virtual bool adminOnly() const { return false; }
+
+        BSONObj generateSection( const BSONElement& configElement, bool userIsAdmin ) const {
+            BSONObjBuilder b;
+            ClientCursor::appendStats( b );
+            return b.obj();
+        }
+
+    } cursorServerStats;
+
     struct Mem { 
         Mem() { res = virt = mapped = 0; }
         long long res;
@@ -741,7 +791,7 @@ namespace mongo {
                     else {
                         log() << " mapped:" << totalMapped;
                     }
-                    log() << " connections:" << connTicketHolder.used();
+                    log() << " connections:" << Listener::globalTicketHolder.used();
                     if (theReplSet) {
                         log() << " replication threads:" << 
                             ReplSetImpl::replWriterThreadCount + 
@@ -792,7 +842,7 @@ namespace mongo {
         if ( ! cc().getAuthenticationInfo()->isAuthorizedReads( nsToDatabase( cursor->ns() ) ) )
             return false;
 
-        // mustn't have an active ClientCursor::Pointer
+        // Must not have an active ClientCursor::Pin.
         massert( 16089,
                 str::stream() << "Cannot kill active cursor " << id,
                 cursor->_pinValue < 100 );

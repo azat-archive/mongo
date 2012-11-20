@@ -34,30 +34,14 @@
 namespace mongo {
 
     struct ShardNS {
-        static string shard;
-
-        static string database;
-        static string collection;
-        static string chunk;
-        static string tags;
-
         static string mongos;
         static string settings;
-    };
-
-    /**
-     * Field names used in the 'shards' collection.
-     */
-    struct ShardFields {
-        static BSONField<bool> draining;      // is it draining chunks?
-        static BSONField<long long> maxSize;  // max allowed disk space usage
     };
 
     class ConfigServer;
 
     class DBConfig;
     typedef boost::shared_ptr<DBConfig> DBConfigPtr;
-    typedef shared_ptr<Shard> ShardPtr;
 
     extern DBConfigPtr configServerPtr;
     extern ConfigServer& configServer;
@@ -164,7 +148,7 @@ namespace mongo {
             return _primary;
         }
 
-        void setPrimary( string s );
+        void setPrimary( const std::string& s );
 
         bool load();
         bool reload();
@@ -226,7 +210,7 @@ namespace mongo {
         */
         bool init( vector<string> configHosts );
 
-        bool init( string s );
+        bool init( const std::string& s );
 
         bool allUp();
         bool allUp( string& errmsg );
@@ -268,7 +252,7 @@ namespace mongo {
         bool checkConfigServersConsistent( string& errmsg , int tries = 4 ) const;
 
     private:
-        string getHost( string name , bool withPort );
+        string getHost( const std::string& name , bool withPort );
         vector<string> _config;
     };
 

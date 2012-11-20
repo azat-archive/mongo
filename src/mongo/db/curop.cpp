@@ -14,9 +14,11 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "pch.h"
-#include "curop.h"
-#include "database.h"
+#include "mongo/pch.h"
+
+#include "mongo/db/curop.h"
+#include "mongo/db/database.h"
+#include "mongo/db/kill_current_op.h"
 
 namespace mongo {
 
@@ -45,7 +47,8 @@ namespace mongo {
         _end = 0;
         _message = "";
         _progressMeter.finished();
-        _killed = false;
+        _killPending.store(0);
+        killCurrentOp.notifyAllWaiters();
         _numYields = 0;
         _expectedLatencyMs = 0;
         _lockStat.reset();
@@ -96,6 +99,8 @@ namespace mongo {
     }
 
     CurOp::~CurOp() {
+        killCurrentOp.notifyAllWaiters();
+
         if ( _wrapped ) {
             scoped_lock bl(Client::clientsMutex);
             _client->_curOp = _wrapped;
@@ -172,8 +177,8 @@ namespace mongo {
             }
         }
 
-        if( killed() ) 
-            b.append("killed", true);
+        if( killPending() ) 
+            b.append("killPending", true);
         
         b.append( "numYields" , _numYields );
         b.append( "lockStats" , _lockStat.report() );
@@ -181,26 +186,18 @@ namespace mongo {
         return b.obj();
     }
 
-    void KillCurrentOp::checkForInterrupt( bool heedMutex ) {
-        Client& c = cc();
-        if ( heedMutex && Lock::somethingWriteLocked() && c.hasWrittenThisPass() )
-            return;
-        if( _globalKill )
-            uasserted(11600,"interrupted at shutdown");
-        if( c.curop()->killed() ) {
-            uasserted(11601,"operation was interrupted");
-        }
-    }
-    
-    const char * KillCurrentOp::checkForInterruptNoAssert() {
-        Client& c = cc();
-        if( _globalKill )
-            return "interrupted at shutdown";
-        if( c.curop()->killed() )
-            return "interrupted";
-        return "";
+    void CurOp::setKillWaiterFlags() {
+        for (size_t i = 0; i < _notifyList.size(); ++i) 
+            *(_notifyList[i]) = true;
+        _notifyList.clear();
     }
 
+    void CurOp::kill(bool* pNotifyFlag /* = NULL */) { 
+        _killPending.store(1);
+        if (pNotifyFlag) {
+            _notifyList.push_back(pNotifyFlag);
+        }
+    }
 
     AtomicUInt CurOp::_nextOpNum;
 

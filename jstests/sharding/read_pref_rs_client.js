@@ -2,6 +2,7 @@
  * Testing read preference on DBClientReplicaSets, specifically on the auto-retry
  * and automatic failover selection
  */
+// NOTE: this test is skipped when running smoke.py with --auth because of SERVER-6972
 
 function basicTest() {
     var replTest = new ReplSetTest({ name: 'basic', nodes: 2, useHostName: true });
@@ -42,7 +43,7 @@ function basicTest() {
 }
 
 function noPriNoSecTest() {
-    var replTest = new ReplSetTest({ name: 'priOnlyNoPri', useHostName: true,
+    var replTest = new ReplSetTest({ name: 'noPriNoSec', useHostName: true,
         nodes: [{}, { arbiter: true }, { arbiter: true }]});
     replTest.startSet({ oplogSize: 1 });
     replTest.initiate();
@@ -101,7 +102,7 @@ function noPriNoSecTest() {
 }
 
 function priOkNoSecTest() {
-    var replTest = new ReplSetTest({ name: 'secOnlyNoSec', useHostName: true,
+    var replTest = new ReplSetTest({ name: 'priOkNoSec', useHostName: true,
         nodes: [{}, { arbiter: true }, {}]});
     replTest.startSet({ oplogSize: 1 });
     replTest.initiate();
@@ -146,7 +147,7 @@ function priOkNoSecTest() {
 }
 
 function noPriSecOkTest() {
-    var replTest = new ReplSetTest({ name: 'priPrefNoPri', useHostName: true,
+    var replTest = new ReplSetTest({ name: 'noPriSecOk', useHostName: true,
         nodes: [{ }, { arbiter: true }, { }]});
     replTest.startSet({ oplogSize: 1 });
     replTest.initiate();
@@ -180,12 +181,7 @@ function noPriSecOkTest() {
         coll.find().readPref('primary').explain();
     });
 
-    // Needs to restart server, otherwise the js Mongo constructor
-    // would throw because it can't find the primary
-    replTest.start(0, {}, true);
-    replTest.awaitSecondaryNodes();
     replConn = new Mongo(replTest.getURL());
-    replTest.stop(0);
     coll = replConn.getDB('test').user;
     var dest = coll.find().readPref('primaryPreferred').explain().server;
     assert.eq(SEC_HOST, dest);

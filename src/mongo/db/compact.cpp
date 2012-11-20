@@ -29,6 +29,7 @@
 #include "mongo/db/extsort.h"
 #include "mongo/db/index.h"
 #include "mongo/db/index_update.h"
+#include "mongo/db/kill_current_op.h"
 #include "mongo/db/pdfile.h"
 #include "mongo/util/concurrency/task.h"
 #include "mongo/util/timer.h"
@@ -36,8 +37,6 @@
 
 namespace mongo {
 
-    void addRecordToRecListInExtent(Record *r, DiskLoc loc);
-    DiskLoc allocateSpaceForANewRecord(const char *ns, NamespaceDetails *d, int lenWHdr, bool god);
     void freeExtents(DiskLoc firstExt, DiskLoc lastExt);
 
     /* this should be done in alloc record not here, but doing here for now. 
@@ -63,7 +62,7 @@ namespace mongo {
 
         Extent *e = diskloc.ext();
         e->assertOk();
-        verify( e->validates() );
+        verify( e->validates(diskloc) );
         unsigned skipped = 0;
 
         {
@@ -122,7 +121,7 @@ namespace mongo {
                         {
                             // extract keys for all indexes we will be rebuilding
                             for( int x = 0; x < nidx; x++ ) { 
-                                phase1[x].addKeys(indexSpecs[x], objOld, loc);
+                                phase1[x].addKeys(indexSpecs[x], objOld, loc, false);
                             }
                         }
                     }

@@ -1,6 +1,7 @@
 // mr.cpp
 
 /**
+ *    Copyright (C) 2012 10gen Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -28,6 +29,7 @@
 #include "../../s/d_chunk_manager.h"
 #include "../../s/d_logic.h"
 #include "../../s/grid.h"
+#include "mongo/db/kill_current_op.h"
 
 #include "mr.h"
 
@@ -37,7 +39,7 @@ namespace mongo {
 
         AtomicUInt Config::JOB_NUMBER;
 
-        JSFunction::JSFunction( string type , const BSONElement& e ) {
+        JSFunction::JSFunction( const std::string& type , const BSONElement& e ) {
             _type = type;
             _code = e._asCode();
 
@@ -594,7 +596,7 @@ namespace mongo {
          */
         void State::_insertToInc( BSONObj& o ) {
             verify( _onDisk );
-            theDataFileMgr.insertWithObjMod( _config.incLong.c_str() , o , true );
+            theDataFileMgr.insertWithObjMod( _config.incLong.c_str(), o, false, true );
             getDur().commitIfNeeded();
         }
 
@@ -681,7 +683,7 @@ namespace mongo {
         }
 
         void State::bailFromJS() {
-            log(1) << "M/R: Switching from JS mode to mixed mode" << endl;
+            LOG(1) << "M/R: Switching from JS mode to mixed mode" << endl;
 
             // reduce and reemit into c++
             switchMode(false);
@@ -839,7 +841,7 @@ namespace mongo {
             {
                 dbtempreleasecond tl;
                 if ( ! tl.unlocked() )
-                    log( LL_WARNING ) << "map/reduce can't temp release" << endl;
+                    LOG( LL_WARNING ) << "map/reduce can't temp release" << endl;
                 // reduce and finalize last array
                 finalReduce( all );
             }
@@ -949,7 +951,7 @@ namespace mongo {
                     // reduce now to lower mem usage
                     Timer t;
                     _scope->invoke(_reduceAll, 0, 0, 0, true);
-                    log(1) << "  MR - did reduceAll: keys=" << keyCt << " dups=" << dupCt << " newKeys=" << _scope->getNumberInt("_keyCt") << " time=" << t.millis() << "ms" << endl;
+                    LOG(1) << "  MR - did reduceAll: keys=" << keyCt << " dups=" << dupCt << " newKeys=" << _scope->getNumberInt("_keyCt") << " time=" << t.millis() << "ms" << endl;
                     return;
                 }
             }
@@ -962,12 +964,12 @@ namespace mongo {
                 long oldSize = _size;
                 Timer t;
                 reduceInMemory();
-                log(1) << "  MR - did reduceInMemory: size=" << oldSize << " dups=" << _dupCount << " newSize=" << _size << " time=" << t.millis() << "ms" << endl;
+                LOG(1) << "  MR - did reduceInMemory: size=" << oldSize << " dups=" << _dupCount << " newSize=" << _size << " time=" << t.millis() << "ms" << endl;
 
                 // if size is still high, or values are not reducing well, dump
                 if ( _onDisk && (_size > _config.maxInMemSize || _size > oldSize / 2) ) {
                     dumpToInc();
-                    log(1) << "  MR - dumping to db" << endl;
+                    LOG(1) << "  MR - dumping to db" << endl;
                 }
             }
         }
@@ -1037,11 +1039,11 @@ namespace mongo {
 
                 Config config( dbname , cmd );
 
-                log(1) << "mr ns: " << config.ns << endl;
+                LOG(1) << "mr ns: " << config.ns << endl;
 
                 uassert( 16149 , "cannot run map reduce without the js engine", globalScriptEngine );
 
-                auto_ptr<ClientCursor> holdCursor;
+                ClientCursor::Holder holdCursor;
                 ShardChunkManagerPtr chunkManager;
 
                 {
@@ -1057,8 +1059,8 @@ namespace mongo {
                     // Get a very basic cursor, prevents deletion of migrated data while we m/r
                     shared_ptr<Cursor> temp = NamespaceDetailsTransient::getCursor( config.ns.c_str(), BSONObj(), BSONObj() );
                     uassert( 15876, str::stream() << "could not create cursor over " << config.ns << " to hold data while prepping m/r", temp.get() );
-                    holdCursor = auto_ptr<ClientCursor>( new ClientCursor( QueryOption_NoCursorTimeout , temp , config.ns.c_str() ) );
-                    uassert( 15877, str::stream() << "could not create m/r holding client cursor over " << config.ns, holdCursor.get() );
+                    holdCursor.reset( new ClientCursor( QueryOption_NoCursorTimeout , temp , config.ns.c_str() ) );
+                    uassert( 15877, str::stream() << "could not create m/r holding client cursor over " << config.ns, holdCursor );
 
                 }
 
@@ -1150,7 +1152,6 @@ namespace mongo {
 
                                 if ( ! yield.stillOk() ) {
                                     cursor.release();
-                                    holdCursor.release();
                                     break;
                                 }
 
@@ -1325,7 +1326,8 @@ namespace mongo {
 
                     // reduce from each shard for a chunk
                     BSONObj sortKey = BSON( "_id" << 1 );
-                    ParallelSortClusteredCursor cursor( servers , inputNS , Query( query ).sort( sortKey ) );
+                    ParallelSortClusteredCursor cursor(servers, inputNS,
+                            Query(query).sort(sortKey), QueryOption_NoCursorTimeout);
                     cursor.init();
                     int chunkSize = 0;
 

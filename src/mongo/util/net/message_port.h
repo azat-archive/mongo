@@ -63,6 +63,8 @@ namespace mongo {
 
         virtual ~MessagingPort();
 
+        void setSocketTimeout(double timeout);
+
         void shutdown();
 
         /* it's assumed if you reuse a message object, that it doesn't cross MessagingPort's.
@@ -82,7 +84,7 @@ namespace mongo {
          * say( to )
          * recv( from )
          * Note: if you fail to call recv and someone else uses this port,
-         *       horrible things will happend
+         *       horrible things will happen
          */
         bool recv( const Message& sent , Message& response );
 
@@ -108,6 +110,10 @@ namespace mongo {
             psock->secure( ssl );
         }
 #endif
+
+        uint64_t getSockCreationMicroSec() const {
+            return psock->getSockCreationMicroSec();
+        }
 
     private:
         

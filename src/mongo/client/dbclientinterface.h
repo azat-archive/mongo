@@ -25,6 +25,7 @@
 #include "mongo/client/authlevel.h"
 #include "mongo/client/authentication_table.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/util/net/message.h"
 #include "mongo/util/net/message_port.h"
 
@@ -56,7 +57,7 @@ namespace mongo {
         // an extended period of time.
         QueryOption_OplogReplay = 1 << 3,
 
-        /** The server normally times out idle cursors after an inactivy period to prevent excess memory uses
+        /** The server normally times out idle cursors after an inactivity period to prevent excess memory uses
             Set this option to prevent that.
         */
         QueryOption_NoCursorTimeout = 1 << 4,
@@ -165,6 +166,11 @@ namespace mongo {
         ReadPreference_Nearest,
     };
 
+    /**
+     * @return true if the query object contains a read preference specification object.
+     */
+    bool hasReadPreference(const BSONObj& queryObj);
+
     class DBClientBase;
 
     /**
@@ -174,6 +180,9 @@ namespace mongo {
      *    server:port
      *    foo/server:port,server:port   SET
      *    server,server,server          SYNC
+     *                                    Warning - you usually don't want "SYNC", it's used 
+     *                                    for some special things such as sharding config servers.
+     *                                    See syncclusterconnection.h for more info.
      *
      * tyipcal use
      * string errmsg,
@@ -246,6 +255,14 @@ namespace mongo {
         vector<HostAndPort> getServers() const { return _servers; }
         
         ConnectionType type() const { return _type; }
+
+        /**
+         * This returns true if this and other point to the same logical entity.
+         * For single nodes, thats the same address.
+         * For replica sets, thats just the same replica set name.
+         * For pair (deprecated) or sync cluster connections, that's the same hosts in any ordering.
+         */
+        bool sameLogicalEndpoint( const ConnectionString& other ) const;
 
         static ConnectionString parse( const string& url , string& errmsg );
 
@@ -631,16 +648,30 @@ namespace mongo {
         bool createCollection(const string &ns, long long size = 0, bool capped = false, int max = 0, BSONObj *info = 0);
 
         /** Get error result from the last write operation (insert/update/delete) on this connection.
+            db doesn't change the command's behavior - it is just for auth checks.
             @return error message text, or empty string if no error.
         */
+        string getLastError(const std::string& db,
+                            bool fsync = false,
+                            bool j = false,
+                            int w = 0,
+                            int wtimeout = 0);
+        // Same as above but defaults to using admin DB
         string getLastError(bool fsync = false, bool j = false, int w = 0, int wtimeout = 0);
 
         /** Get error result from the last write operation (insert/update/delete) on this connection.
+            db doesn't change the command's behavior - it is just for auth checks.
             @return full error object.
 
             If "w" is -1, wait for propagation to majority of nodes.
             If "wtimeout" is 0, the operation will block indefinitely if needed.
         */
+        virtual BSONObj getLastErrorDetailed(const std::string& db,
+                                             bool fsync = false,
+                                             bool j = false,
+                                             int w = 0,
+                                             int wtimeout = 0);
+        // Same as above but defaults to using admin DB
         virtual BSONObj getLastErrorDetailed(bool fsync = false, bool j = false, int w = 0, int wtimeout = 0);
 
         /** Can be called with the returned value from getLastErrorDetailed to extract an error string. 
@@ -841,12 +872,18 @@ namespace mongo {
            @param cache if set to false, the index cache for the connection won't remember this call
            @param background build index in the background (see mongodb docs/wiki for details)
            @param v index version. leave at default value. (unit tests set this parameter.)
+           @param ttl. The value of how many seconds before data should be removed from a collection.
            @return whether or not sent message to db.
              should be true on first call, false on subsequent unless resetIndexCache was called
          */
-        virtual bool ensureIndex( const string &ns , BSONObj keys , bool unique = false, const string &name = "",
-                                  bool cache = true, bool background = false, int v = -1 );
-
+        virtual bool ensureIndex( const string &ns,
+                                  BSONObj keys,
+                                  bool unique = false,
+                                  const string &name = "",
+                                  bool cache = true,
+                                  bool background = false,
+                                  int v = -1,
+                                  int ttl = 0 );
         /**
            clears the index cache, so the subsequent call to ensureIndex for any index will go to the server
          */
@@ -907,12 +944,18 @@ namespace mongo {
      */
     class DBClientBase : public DBClientWithCommands, public DBConnector {
     protected:
+        static AtomicInt64 ConnectionIdSequence;
+        long long _connectionId; // unique connection id for this connection
         WriteConcern _writeConcern;
-
     public:
+        static const uint64_t INVALID_SOCK_CREATION_TIME;
+
         DBClientBase() {
             _writeConcern = W_NORMAL;
+            _connectionId = ConnectionIdSequence.fetchAndAdd(1);
         }
+
+        long long getConnectionId() const { return _connectionId; }
 
         WriteConcern getWriteConcern() const { return _writeConcern; }
         void setWriteConcern( WriteConcern w ) { _writeConcern = w; }
@@ -1001,6 +1044,10 @@ namespace mongo {
         virtual ConnectionString::ConnectionType type() const = 0;
         
         virtual double getSoTimeout() const = 0;
+
+        virtual uint64_t getSockCreationMicroSec() const {
+            return INVALID_SOCK_CREATION_TIME;
+        }
 
     }; // DBClientBase
 
@@ -1123,7 +1170,7 @@ namespace mongo {
         virtual void checkResponse( const char *data, int nReturned, bool* retry = NULL, string* host = NULL );
         virtual bool call( Message &toSend, Message &response, bool assertOk = true , string * actualServer = 0 );
         virtual ConnectionString::ConnectionType type() const { return ConnectionString::MASTER; }
-        void setSoTimeout(double to) { _so_timeout = to; }
+        void setSoTimeout(double timeout);
         double getSoTimeout() const { return _so_timeout; }
 
         virtual bool lazySupported() const { return true; }
@@ -1131,10 +1178,12 @@ namespace mongo {
         static int getNumConnections() {
             return _numConnections;
         }
-        
+
         static void setLazyKillCursor( bool lazy ) { _lazyKillCursor = lazy; }
         static bool getLazyKillCursor() { return _lazyKillCursor; }
-        
+
+        uint64_t getSockCreationMicroSec() const;
+
     protected:
         friend class SyncClusterConnection;
         virtual void sayPiggyBack( Message &toSend );

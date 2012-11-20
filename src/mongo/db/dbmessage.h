@@ -212,13 +212,18 @@ namespace mongo {
 
         const Message& msg() const { return m; }
 
+        const char * markGet() {
+            return nextjsobj;
+        }
+
         void markSet() {
             mark = nextjsobj;
         }
 
-        void markReset() {
-            verify( mark );
-            nextjsobj = mark;
+        void markReset( const char * toMark = 0) {
+            if( toMark == 0 ) toMark = mark;
+            verify( toMark );
+            nextjsobj = toMark;
         }
 
     private:
@@ -266,7 +271,7 @@ namespace mongo {
     /* object reply helper. */
     void replyToQuery(int queryResultFlags,
                       AbstractMessagingPort* p, Message& requestMsg,
-                      BSONObj& responseObj);
+                      const BSONObj& responseObj);
 
     /* helper to do a reply using a DbResponse object */
     void replyToQuery( int queryResultFlags, Message& m, DbResponse& dbresponse, BSONObj obj );

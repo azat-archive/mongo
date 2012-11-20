@@ -28,6 +28,9 @@
 
 namespace mongo {
 
+    // todo / idea: the prefetcher, when it fetches _id, on an upsert, will see if the record exists. if it does not, 
+    //              at write time, we can just do an insert, which will be faster.
+
     // prefetch for an oplog operation
     void prefetchPagesForReplicatedOp(const BSONObj& op) {
         const char *opField;
@@ -164,7 +167,7 @@ namespace mongo {
                         _dummy_char += *(result.objdata() + i); 
                     }
                     // hit the last page, in case we missed it above
-                    _dummy_char += *(result.objdata() + result.objsize());
+                    _dummy_char += *(result.objdata() + result.objsize() - 1);
                 }
             }
             catch(const DBException& e) {

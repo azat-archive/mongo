@@ -15,11 +15,11 @@
  *    limitations under the License.
  */
 
-#include "engine_v8.h"
+#include "mongo/scripting/engine_v8.h"
 
-#include "v8_wrapper.h"
-#include "v8_utils.h"
-#include "v8_db.h"
+#include "mongo/scripting/v8_db.h"
+#include "mongo/scripting/v8_utils.h"
+#include "mongo/scripting/v8_wrapper.h"
 
 #define V8_SIMPLE_HEADER v8::Locker l(_isolate); v8::Isolate::Scope iscope(_isolate); HandleScope handle_scope; Context::Scope context_scope( _context );
 
@@ -310,7 +310,7 @@ namespace mongo {
     void gcCallback(GCType type, GCCallbackFlags flags) {
         HeapStatistics stats;
         V8::GetHeapStatistics( &stats );
-        log(1) << "V8 GC heap stats - "
+        LOG(1) << "V8 GC heap stats - "
                 << " total: " << stats.total_heap_size()
                 << " exec: " << stats.total_heap_size_executable()
                 << " used: " << stats.used_heap_size()<< " limit: "
@@ -343,6 +343,10 @@ namespace mongo {
         if ( !globalScriptEngine ) {
             globalScriptEngine = new V8ScriptEngine();
         }
+    }
+
+    std::string ScriptEngine::getInterpreterVersionString() {
+        return "V8 3.12.19";
     }
 
     void V8ScriptEngine::interrupt( unsigned opSpec ) {
@@ -493,6 +497,7 @@ namespace mongo {
     }
 
     bool V8Scope::hasOutOfMemoryException() {
+        V8_SIMPLE_HEADER
         if (!_context.IsEmpty())
             return _context->HasOutOfMemoryException();
         return false;
@@ -1003,6 +1008,10 @@ namespace mongo {
             return Local< v8::Value >::New( v8::Null() );
         }
         Local< Value > ret = compiled->Run();
+        if (ret.IsEmpty()) {
+            warning() << "Could not assign function: " << codeStr.c_str() << endl;
+            return Local<v8::Value>::New(v8::Null());
+        }
         return ret;
     }
 

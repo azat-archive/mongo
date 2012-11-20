@@ -348,6 +348,20 @@ namespace mongo {
         return 0;
     }
 
+    Member* ReplSetImpl::findByName(const std::string& hostname) const {
+        if (_self && hostname == _self->fullName()) {
+            return _self;
+        }
+
+        for (Member *m = head(); m; m = m->next()) {
+            if (m->fullName() == hostname) {
+                return m;
+            }
+        }
+
+        return NULL;
+    }
+
     const OpTime ReplSetImpl::lastOtherOpTime() const {
         OpTime closest(0,0);
 
@@ -421,10 +435,11 @@ namespace mongo {
                 bb.appendDate("optimeDate", m->hbinfo().opTime.getSecs() * 1000LL);
             }
             bb.appendTimeT("lastHeartbeat", m->hbinfo().lastHeartbeat);
+            bb.appendTimeT("lastHeartbeatRecv", m->hbinfo().lastHeartbeatRecv);
             bb.append("pingMs", m->hbinfo().ping);
             string s = m->lhb();
             if( !s.empty() )
-                bb.append("errmsg", s);
+                bb.append("lastHeartbeatMessage", s);
 
             if (m->hbinfo().authIssue) {
                 bb.append("authenticated", false);

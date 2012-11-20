@@ -20,7 +20,7 @@
 #include <map>
 #include <string>
 
-#include "../db/btree.h"
+#include "mongo/db/btreecursor.h"
 #include "../db/commands.h"
 #include "../db/jsobj.h"
 #include "../db/instance.h"
@@ -107,7 +107,7 @@ namespace mongo {
                 max = Helpers::modifiedRangeBound( max , idx->keyPattern() , -1 );
             }
 
-            BtreeCursor * bc = BtreeCursor::make( d , d->idxNo(*idx) , *idx , min , max , false , 1 );
+            BtreeCursor* bc = BtreeCursor::make( d, *idx, min, max, false, 1 );
             shared_ptr<Cursor> c( bc );
             auto_ptr<ClientCursor> cc( new ClientCursor( QueryOption_NoCursorTimeout , c , ns ) );
             if ( ! cc->ok() ) {
@@ -315,7 +315,7 @@ namespace mongo {
                 long long currCount = 0;
                 long long numChunks = 0;
                 
-                BtreeCursor * bc = BtreeCursor::make( d , d->idxNo(*idx) , *idx , min , max , false , 1 );
+                BtreeCursor * bc = BtreeCursor::make( d, *idx, min, max, false, 1 );
                 shared_ptr<Cursor> c( bc );
                 auto_ptr<ClientCursor> cc( new ClientCursor( QueryOption_NoCursorTimeout , c , ns ) );
                 if ( ! cc->ok() ) {
@@ -378,7 +378,7 @@ namespace mongo {
                     currCount = 0;
                     log() << "splitVector doing another cycle because of force, keyCount now: " << keyCount << endl;
                     
-                    bc = BtreeCursor::make( d , d->idxNo(*idx) , *idx , min , max , false , 1 );
+                    bc = BtreeCursor::make( d, *idx, min, max, false, 1 );
                     c.reset( bc );
                     cc.reset( new ClientCursor( QueryOption_NoCursorTimeout , c , ns ) );
                 }
@@ -407,11 +407,11 @@ namespace mongo {
                 
                 // Warning: we are sending back an array of keys but are currently limited to
                 // 4MB work of 'result' size. This should be okay for now.
-                
+
+                result.append( "timeMillis", timer.millis() );
             }
 
             result.append( "splitKeys" , splitKeys );
-
             return true;
 
         }
@@ -434,9 +434,9 @@ namespace mongo {
 
     void ChunkInfo::appendShortVersion( const char * name , BSONObjBuilder& b ) const {
         BSONObjBuilder bb( b.subobjStart( name ) );
-        bb.append( "min" , min );
-        bb.append( "max" , max );
-        lastmod.addToBSON( bb, "lastmod" );
+        bb.append(ChunkFields::min(), min);
+        bb.append(ChunkFields::max(), max);
+        lastmod.addToBSON(bb, ChunkFields::lastmod());
         bb.done();
     }
 
@@ -562,21 +562,24 @@ namespace mongo {
                         ScopedDbConnection::getInternalScopedDbConnection(
                                 shardingState.getConfigServer() ) );
 
-                BSONObj x = conn->get()->findOne( ShardNS::chunk,
-                                                  Query( BSON( "ns" << ns ) )
-                                                      .sort( BSON( "lastmod" << -1 ) ) );
-                maxVersion = ShardChunkVersion::fromBSON( x, "lastmod" );
+                BSONObj x = conn->get()->findOne(ConfigNS::chunk,
+                                                 Query(BSON(ChunkFields::ns(ns)))
+                                                     .sort(BSON(ChunkFields::lastmod() << -1)));
 
-                BSONObj currChunk = conn->get()->findOne( ShardNS::chunk , shardId.wrap( "_id" ) )
-                    .getOwned();
-                verify( currChunk["shard"].type() );
-                verify( currChunk["min"].type() );
-                verify( currChunk["max"].type() );
-                shard = currChunk["shard"].String();
+                maxVersion = ShardChunkVersion::fromBSON(x, ChunkFields::lastmod());
+
+                BSONObj currChunk =
+                    conn->get()->findOne(ConfigNS::chunk,
+                                         shardId.wrap(ChunkFields::name().c_str())).getOwned();
+
+                verify(currChunk[ChunkFields::shard()].type());
+                verify(currChunk[ChunkFields::min()].type());
+                verify(currChunk[ChunkFields::max()].type());
+                shard = currChunk[ChunkFields::shard()].String();
                 conn->done();
 
-                BSONObj currMin = currChunk["min"].Obj();
-                BSONObj currMax = currChunk["max"].Obj();
+                BSONObj currMin = currChunk[ChunkFields::min()].Obj();
+                BSONObj currMax = currChunk[ChunkFields::max()].Obj();
                 if ( currMin.woCompare( min ) || currMax.woCompare( max ) ) {
                     errmsg = "chunk boundaries are outdated (likely a split occurred)";
                     result.append( "currMin" , currMin );
@@ -584,7 +587,7 @@ namespace mongo {
                     result.append( "requestedMin" , min );
                     result.append( "requestedMax" , max );
 
-                    log( LL_WARNING ) << "aborted split because " << errmsg << ": " << min << "->" << max
+                    LOG( LL_WARNING ) << "aborted split because " << errmsg << ": " << min << "->" << max
                                       << " is now " << currMin << "->" << currMax << endl;
                     return false;
                 }
@@ -594,7 +597,7 @@ namespace mongo {
                     result.append( "from" , myShard.getName() );
                     result.append( "official" , shard );
 
-                    log( LL_WARNING ) << "aborted split because " << errmsg << ": chunk is at " << shard
+                    LOG( LL_WARNING ) << "aborted split because " << errmsg << ": chunk is at " << shard
                                       << " and not at " << myShard.getName() << endl;
                     return false;
                 }
@@ -604,14 +607,14 @@ namespace mongo {
                     maxVersion.addToBSON( result, "officialVersion" );
                     shardingState.getVersion( ns ).addToBSON( result, "myVersion" );
 
-                    log( LL_WARNING ) << "aborted split because " << errmsg << ": official " << maxVersion
+                    LOG( LL_WARNING ) << "aborted split because " << errmsg << ": official " << maxVersion
                                       << " mine: " << shardingState.getVersion(ns) << endl;
                     return false;
                 }
 
                 origChunk.min = currMin.getOwned();
                 origChunk.max = currMax.getOwned();
-                origChunk.lastmod = ShardChunkVersion::fromBSON( currChunk["lastmod"] );
+                origChunk.lastmod = ShardChunkVersion::fromBSON(currChunk[ChunkFields::lastmod()]);
 
                 // since this could be the first call that enable sharding we also make sure to have the chunk manager up to date
                 shardingState.gotShardName( shard );
@@ -649,21 +652,21 @@ namespace mongo {
                 BSONObjBuilder op;
                 op.append( "op" , "u" );
                 op.appendBool( "b" , true );
-                op.append( "ns" , ShardNS::chunk );
+                op.append( "ns" , ConfigNS::chunk );
 
                 // add the modified (new) chunk information as the update object
                 BSONObjBuilder n( op.subobjStart( "o" ) );
-                n.append( "_id" , Chunk::genID( ns , startKey ) );
-                myVersion.addToBSON( n, "lastmod" );
-                n.append( "ns" , ns );
-                n.append( "min" , startKey );
-                n.append( "max" , endKey );
-                n.append( "shard" , shard );
+                n.append(ChunkFields::name(), Chunk::genID(ns, startKey));
+                myVersion.addToBSON(n, ChunkFields::lastmod());
+                n.append(ChunkFields::ns(), ns);
+                n.append(ChunkFields::min(), startKey);
+                n.append(ChunkFields::max(), endKey);
+                n.append(ChunkFields::shard(), shard);
                 n.done();
 
                 // add the chunk's _id as the query part of the update statement
                 BSONObjBuilder q( op.subobjStart( "o2" ) );
-                q.append( "_id" , Chunk::genID( ns , startKey ) );
+                q.append(ChunkFields::name(), Chunk::genID(ns, startKey));
                 q.done();
 
                 updates.append( op.obj() );
@@ -679,12 +682,13 @@ namespace mongo {
             {
                 BSONArrayBuilder preCond( cmdBuilder.subarrayStart( "preCondition" ) );
                 BSONObjBuilder b;
-                b.append( "ns" , ShardNS::chunk );
-                b.append( "q" , BSON( "query" << BSON( "ns" << ns ) << "orderby" << BSON( "lastmod" << -1 ) ) );
+                b.append("ns", ConfigNS::chunk);
+                b.append("q", BSON("query" << BSON(ChunkFields::ns(ns)) <<
+                                   "orderby" << BSON(ChunkFields::lastmod() << -1)));
                 {
                     BSONObjBuilder bb( b.subobjStart( "res" ) );
                     // TODO: For backwards compatibility, we can't yet require an epoch here
-                    bb.appendTimestamp( "lastmod", maxVersion.toLong() );
+                    bb.appendTimestamp(ChunkFields::lastmod(), maxVersion.toLong());
                     bb.done();
                 }
                 preCond.append( b.obj() );
@@ -749,15 +753,36 @@ namespace mongo {
 
             if (newChunks.size() == 2){
                 // If one of the chunks has only one object in it we should move it
-                static const BSONObj fields = BSON("_id" << 1 );
-                DBDirectClient conn;
                 for (int i=1; i >= 0 ; i--){ // high chunk more likely to have only one obj
-                    ChunkInfo chunk = newChunks[i];
-                    Query q = Query().minKey(chunk.min).maxKey(chunk.max);
-                    scoped_ptr<DBClientCursor> c (conn.query(ns, q, /*limit*/-2, 0, &fields));
-                    if (c && c->itcount() == 1) {
-                        result.append("shouldMigrate", BSON("min" << chunk.min << "max" << chunk.max));
+
+                    Client::ReadContext ctx( ns );
+                    NamespaceDetails *d = nsdetails( ns.c_str() );
+
+                    const IndexDetails *idx = d->findIndexByPrefix( keyPattern ,
+                                                                    true ); /* exclude multikeys */
+                    if ( idx == NULL ) {
                         break;
+                    }
+
+                    ChunkInfo chunk = newChunks[i];
+                    BSONObj newmin = Helpers::modifiedRangeBound(chunk.min, idx->keyPattern(), -1);
+                    BSONObj newmax = Helpers::modifiedRangeBound(chunk.max , idx->keyPattern(), -1);
+
+                    scoped_ptr<BtreeCursor> bc( BtreeCursor::make( d,
+                                                                   *idx,
+                                                                   newmin, /* lower */
+                                                                   newmax, /* upper */
+                                                                   false, /* upper noninclusive */
+                                                                   1 ) ); /* direction */
+
+                    // check if exactly one document found
+                    if ( bc->ok() ) {
+                        bc->advance();
+                        if ( bc->eof() ) {
+                            result.append( "shouldMigrate",
+                                           BSON("min" << chunk.min << "max" << chunk.max) );
+                            break;
+                        }
                     }
                 }
             }

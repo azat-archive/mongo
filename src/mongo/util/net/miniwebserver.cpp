@@ -171,11 +171,11 @@ namespace mongo {
             psock->close();
         }
         catch ( SocketException& e ) {
-            log(1) << "couldn't send data to http client: " << e << endl;
+            LOG(1) << "couldn't send data to http client: " << e << endl;
         }
     }
 
-    string MiniWebServer::getHeader( const char * req , string wanted ) {
+    string MiniWebServer::getHeader( const char * req , const std::string& wanted ) {
         const char * headers = strchr( req , '\n' );
         if ( ! headers )
             return "";

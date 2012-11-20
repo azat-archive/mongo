@@ -30,7 +30,6 @@
 #include "mongo/bson/util/atomic_int.h"
 #include "mongo/db/jsobjmanipulator.h"
 #include "mongo/db/json.h"
-#include "mongo/db/nonce.h"
 #include "mongo/platform/float_utils.h"
 #include "mongo/util/base64.h"
 #include "mongo/util/embedded_builder.h"
@@ -63,10 +62,7 @@ namespace mongo {
 
     // need to move to bson/, but has dependency on base64 so move that to bson/util/ first.
     inline string BSONElement::jsonString( JsonStringFormat format, bool includeFieldNames, int pretty ) const {
-        BSONType t = type();
         int sign;
-        if ( t == Undefined )
-            return "undefined";
 
         stringstream s;
         if ( includeFieldNames )
@@ -104,6 +100,14 @@ namespace mongo {
             break;
         case jstNULL:
             s << "null";
+            break;
+        case Undefined:
+            if ( format == Strict ) {
+                s << "{ \"$undefined\" : true }";
+            }
+            else {
+                s << "undefined";
+            }
             break;
         case Object:
             s << embeddedObject().jsonString( format, pretty );
@@ -286,9 +290,13 @@ namespace mongo {
             }
             else if ( fn[1] == 't' && fn[2] == 'y' && fn[3] == 'p' && fn[4] == 'e' && fn[5] == 0 )
                 return BSONObj::opTYPE;
-            else if ( fn[1] == 'i' && fn[2] == 'n' && fn[3] == 0 )
-                return BSONObj::opIN;
-            else if ( fn[1] == 'n' && fn[2] == 'i' && fn[3] == 'n' && fn[4] == 0 )
+            else if ( fn[1] == 'i' && fn[2] == 'n') {
+                 if (0 == fn[3]) {
+                     return BSONObj::opIN;
+                 } else if (mongoutils::str::equals(fn + 3, "tersect")) {
+                     return BSONObj::opINTERSECT;
+                 }
+            } else if ( fn[1] == 'n' && fn[2] == 'i' && fn[3] == 'n' && fn[4] == 0 )
                 return BSONObj::NIN;
             else if ( fn[1] == 'a' && fn[2] == 'l' && fn[3] == 'l' && fn[4] == 0 )
                 return BSONObj::opALL;
@@ -420,11 +428,16 @@ namespace mongo {
     }
 
     bool BSONObj::valid() const {
+        int mySize = objsize();
+
         try {
             BSONObjIterator it(*this);
             while( it.moreWithEOO() ) {
                 // both throw exception on failure
                 BSONElement e = it.next(true);
+                if ( e.size() >= mySize )
+                    return false;
+
                 e.validate();
 
                 if (e.eoo()) {
@@ -571,6 +584,21 @@ namespace mongo {
             BSONElement y = b.next();
             if ( x != y )
                 return false;
+        }
+
+        return ! a.more();
+    }
+
+    bool BSONObj::isFieldNamePrefixOf( const BSONObj& otherObj ) const {
+        BSONObjIterator a( *this );
+        BSONObjIterator b( otherObj );
+
+        while ( a.more() && b.more() ) {
+            BSONElement x = a.next();
+            BSONElement y = b.next();
+            if ( ! mongoutils::str::equals( x.fieldName() , y.fieldName() ) ) {
+                return false;
+            }
         }
 
         return ! a.more();

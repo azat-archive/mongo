@@ -92,6 +92,12 @@
     <Filter Include="platform">
       <UniqueIdentifier>{de9ce563-1b79-44a3-a88b-2ca15f134666}</UniqueIdentifier>
     </Filter>
+    <Filter Include="base">
+      <UniqueIdentifier>{3e1af8fb-25f6-4fb4-a7f2-19182cf13eaf}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="bson\mutable">
+      <UniqueIdentifier>{8fc8632d-6c44-4b00-be6a-f0bcc6face8e}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\scripting\engine.cpp">
@@ -227,9 +233,6 @@
     <ClCompile Include="..\..\third_party\boost\libs\program_options\src\winmain.cpp">
       <Filter>Boost</Filter>
     </ClCompile>
-    <ClCompile Include="..\db\commands.cpp">
-      <Filter>db\Source FIles</Filter>
-    </ClCompile>
     <ClCompile Include="..\db\jsobj.cpp">
       <Filter>db\Source FIles</Filter>
     </ClCompile>
@@ -237,9 +240,6 @@
       <Filter>db\Source FIles</Filter>
     </ClCompile>
     <ClCompile Include="..\db\lasterror.cpp">
-      <Filter>db\Source FIles</Filter>
-    </ClCompile>
-    <ClCompile Include="..\db\nonce.cpp">
       <Filter>db\Source FIles</Filter>
     </ClCompile>
     <ClCompile Include="..\util\debug_util.cpp">
@@ -509,7 +509,82 @@
     <ClCompile Include="..\util\concurrency\mutexdebugger.cpp">
       <Filter>util\concurrency</Filter>
     </ClCompile>
-    <ClCompile Include="..\client\authentication_table.cpp">
+    <ClCompile Include="..\scripting\bson_template_evaluator.cpp">
+      <Filter>scripting</Filter>
+    </ClCompile>
+    <ClCompile Include="..\util\safe_num.cpp">
+      <Filter>util\Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\configuration_variable_manager.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\global_initializer.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\global_initializer_registerer.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\init.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\initializer.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\initializer_context.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\initializer_dependency_graph.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\make_string_vector.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\parse_number.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\status.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\util\fail_point.cpp">
+      <Filter>util\Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\util\fail_point_registry.cpp">
+      <Filter>util\Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\platform\random.cpp">
+      <Filter>platform</Filter>
+    </ClCompile>
+    <ClCompile Include="..\util\net\ssl_manager.cpp">
+      <Filter>util\net</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\error_codes.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\bson\util\bson_extract.cpp">
+      <Filter>bson\util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\bson\mutable\mutable_bson.cpp">
+      <Filter>bson\mutable</Filter>
+    </ClCompile>
+    <ClCompile Include="..\bson\mutable\mutable_bson_builder.cpp">
+      <Filter>bson\mutable</Filter>
+    </ClCompile>
+    <ClCompile Include="..\bson\mutable\mutable_bson_heap.cpp">
+      <Filter>bson\mutable</Filter>
+    </ClCompile>
+    <ClCompile Include="..\bson\mutable\mutable_bson_internal.cpp">
+      <Filter>bson\mutable</Filter>
+    </ClCompile>
+    <ClCompile Include="..\util\processinfo.cpp">
+      <Filter>util\Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\util\fail_point_service.cpp">
+      <Filter>util\Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\client\authentication_table_common.cpp">
+      <Filter>client</Filter>
+    </ClCompile>
+    <ClCompile Include="..\client\authentication_table_client.cpp">
       <Filter>client</Filter>
     </ClCompile>
   </ItemGroup>
@@ -556,11 +631,14 @@
     <None Include="..\..\third_party\js-1.7\jsopcode.tbl">
       <Filter>third_party\SpiderMonkey\Header Files</Filter>
     </None>
+    <None Include="..\base\error_codes.err">
+      <Filter>base</Filter>
+    </None>
+    <None Include="..\base\generate_error_codes.py">
+      <Filter>base</Filter>
+    </None>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\bson\util\atomic_int.h">
-      <Filter>bson</Filter>
-    </ClInclude>
     <ClInclude Include="..\pch.h" />
     <ClInclude Include="..\bson\bson-inl.h">
       <Filter>bson</Filter>
@@ -691,8 +769,8 @@
     <ClInclude Include="..\util\mongoutils\str.h">
       <Filter>util\mongoutils</Filter>
     </ClInclude>
-    <ClInclude Include="..\bson\stringdata.h">
-      <Filter>bson</Filter>
+    <ClInclude Include="..\base\string_data.h">
+      <Filter>base</Filter>
     </ClInclude>
     <ClInclude Include="..\client\syncclusterconnection.h">
       <Filter>client</Filter>
@@ -711,9 +789,6 @@
     </ClInclude>
     <ClInclude Include="..\client\undef_macros.h">
       <Filter>client</Filter>
-    </ClInclude>
-    <ClInclude Include="..\s\util.h">
-      <Filter>s</Filter>
     </ClInclude>
     <ClInclude Include="..\util\concurrency\value.h">
       <Filter>util\concurrency</Filter>
@@ -1198,6 +1273,132 @@
     </ClInclude>
     <ClInclude Include="..\client\authentication_table.h">
       <Filter>client</Filter>
+    </ClInclude>
+    <ClInclude Include="..\scripting\bson_template_evaluator.h">
+      <Filter>scripting</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\safe_num.h">
+      <Filter>util\Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\bson\util\atomic_int.h">
+      <Filter>bson\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\bson\bson.h">
+      <Filter>bson</Filter>
+    </ClInclude>
+    <ClInclude Include="..\bson\bson_builder_base.h">
+      <Filter>bson</Filter>
+    </ClInclude>
+    <ClInclude Include="..\bson\bson_field.h">
+      <Filter>bson</Filter>
+    </ClInclude>
+    <ClInclude Include="..\platform\bits.h">
+      <Filter>platform</Filter>
+    </ClInclude>
+    <ClInclude Include="..\platform\strtoll.h">
+      <Filter>platform</Filter>
+    </ClInclude>
+    <ClInclude Include="..\platform\unordered_map.h">
+      <Filter>platform</Filter>
+    </ClInclude>
+    <ClInclude Include="..\platform\unordered_set.h">
+      <Filter>platform</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\configuration_variable_manager.h">
+      <Filter>base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\disallow_copying.h">
+      <Filter>base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\error_codes.h">
+      <Filter>base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\global_initializer.h">
+      <Filter>base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\global_initializer_registerer.h">
+      <Filter>base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\init.h">
+      <Filter>base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\initializer.h">
+      <Filter>base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\initializer_context.h">
+      <Filter>base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\initializer_dependency_graph.h">
+      <Filter>base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\initializer_function.h">
+      <Filter>base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\make_string_vector.h">
+      <Filter>base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\owned_pointer_vector.h">
+      <Filter>base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\parse_number.h">
+      <Filter>base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\status.h">
+      <Filter>base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\fail_point.h">
+      <Filter>util\Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\fail_point_registry.h">
+      <Filter>util\Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\platform\random.h">
+      <Filter>platform</Filter>
+    </ClInclude>
+    <ClInclude Include="..\platform\cstdint.h">
+      <Filter>platform</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\net\ssl_manager.h">
+      <Filter>util\net</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\counter.h">
+      <Filter>base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\bson\util\bson_extract.h">
+      <Filter>bson\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\bson\mutable\mutable_bson.h">
+      <Filter>bson\mutable</Filter>
+    </ClInclude>
+    <ClInclude Include="..\bson\mutable\mutable_bson_builder.h">
+      <Filter>bson\mutable</Filter>
+    </ClInclude>
+    <ClInclude Include="..\bson\mutable\mutable_bson_heap.h">
+      <Filter>bson\mutable</Filter>
+    </ClInclude>
+    <ClInclude Include="..\bson\mutable\mutable_bson_internal.h">
+      <Filter>bson\mutable</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\fail_point_service.h">
+      <Filter>util\Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\moveablebuffer.h">
+      <Filter>util\Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\string_map.h">
+      <Filter>util\Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\string_map_internal.h">
+      <Filter>util\Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\string_writer.h">
+      <Filter>util\Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\unordered_fast_key_table.h">
+      <Filter>util\Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\unordered_fast_key_table_internal.h">
+      <Filter>util\Header Files</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

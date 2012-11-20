@@ -38,6 +38,26 @@ rsB.getMaster().getDB( "test_b" ).dummy.insert( { x : 1 } )
 rsA.awaitReplication()
 rsB.awaitReplication()
 
+// TEMPORARY
+
+// SERVER-7699
+
+// We need to do something with with both shards using a non-ShardConnection in order for our
+// connPoolStats to report our replica set status, so we just movePrimary some database back
+// and forth using the conn of collSOk
+
+prt("0: fix bug")
+
+var shards = collSOk.getMongo().getDB("config").shards.find().toArray();
+
+assert.eq(null, collSOk.getMongo().getDB("touchBothShards").coll.findOne());
+printjson(collSOk.getMongo().getDB("admin").runCommand({ movePrimary : "touchBothShards", to : shards[1]._id }))
+printjson(collSOk.getMongo().getDB("admin").runCommand({ movePrimary : "touchBothShards", to : shards[0]._id }))
+jsTest.log("Conn pool stats:")
+printjson(collSOk.getMongo().getDB( "admin" ).runCommand( "connPoolStats" ));
+
+// END TEMPORARY
+
 prt("1: initial insert")
 
 coll.save({ _id : -1, a : "a", date : new Date() })
@@ -93,7 +113,37 @@ rsA.waitForState( rsA.getSecondaries(), rsA.SECONDARY, 5 * 60 * 1000 )
 
 prt("10: check our regular and slaveOk query")
 
-assert.eq( coll.find().itcount(), collSOk.find().itcount() )
+// We need to make sure our nodes are considered accessible from mongos - otherwise we fail
+// See SERVER-7274
+ReplSetTest.awaitRSClientHosts(coll.getMongo(), rsA.nodes, { ok : true })
+ReplSetTest.awaitRSClientHosts(coll.getMongo(), rsB.nodes, { ok : true })
+
+// We need to make sure at least one secondary is accessible from mongos - otherwise we fail
+// See SERVER-7699
+ReplSetTest.awaitRSClientHosts(collSOk.getMongo(), [rsA.getSecondaries()[0]], 
+                               { secondary : true, ok : true });
+ReplSetTest.awaitRSClientHosts(collSOk.getMongo(), [rsB.getSecondaries()[0]], 
+                               { secondary : true, ok : true });
+
+prt("SlaveOK Query...")
+var sOKCount = collSOk.find().itcount();
+
+var collCount = null
+try{
+    prt("Normal query...")
+    collCount = coll.find().itcount();
+}
+catch(e){
+    printjson(e);
+    
+    // there may have been a stepdown caused by step 8, so we run this twice in a row. The first time
+    // can error out
+    
+    prt("Error may have been caused by stepdown, try again.")
+    collCount = coll.find().itcount();
+}
+
+assert.eq( collCount, sOKCount );
 
 prt("DONE\n\n\n");
 

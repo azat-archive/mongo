@@ -37,6 +37,7 @@
 #include "../util/progress_meter.h"
 #include "../server.h"
 #include "../util/mmap.h"
+#include "mongo/platform/random.h"
 
 using namespace mongoutils;
 
@@ -46,7 +47,6 @@ namespace mongo {
 
     class AlignedBuilder;
 
-    unsigned goodRandomNumberSlow();
 
     namespace dur {
         // Rotate after reaching this data size in a journal (j._<n>) file
@@ -126,6 +126,17 @@ namespace mongo {
             return false;
         }
 
+        namespace {
+            SecureRandom* mySecureRandom = NULL;
+            mongo::mutex mySecureRandomMutex( "JHeader-SecureRandom" );
+            int64_t getMySecureRandomNumber() {
+                scoped_lock lk( mySecureRandomMutex );
+                if ( ! mySecureRandom )
+                    mySecureRandom = SecureRandom::create();
+                return mySecureRandom->nextInt64();
+            }
+        }
+
         JHeader::JHeader(string fname) {
             magic[0] = 'j'; magic[1] = '\n';
             _version = CurrentVersion;
@@ -136,7 +147,7 @@ namespace mongo {
             strncpy(dbpath, fname.c_str(), sizeof(dbpath)-1);
             {
                 fileId = t&0xffffffff;
-                fileId |= ((unsigned long long)goodRandomNumberSlow()) << 32;
+                fileId |= static_cast<unsigned long long>( getMySecureRandomNumber() ) << 32;
             }
             memset(reserved3, 0, sizeof(reserved3));
             txt2[0] = txt2[1] = '\n';
@@ -176,7 +187,7 @@ namespace mongo {
                 for ( boost::filesystem::directory_iterator i( getJournalDir() );
                         i != boost::filesystem::directory_iterator();
                         ++i ) {
-                    string fileName = boost::filesystem::path(*i).leaf();
+                    string fileName = boost::filesystem::path(*i).leaf().string();
                     if( anyFiles || str::startsWith(fileName, "j._") )
                         return true;
                 }
@@ -194,7 +205,7 @@ namespace mongo {
                 for ( boost::filesystem::directory_iterator i( getJournalDir() );
                         i != boost::filesystem::directory_iterator();
                         ++i ) {
-                    string fileName = boost::filesystem::path(*i).leaf();
+                    string fileName = boost::filesystem::path(*i).leaf().string();
                     if( str::startsWith(fileName, "j._") ) {
                         try {
                             removeOldJournalFile(*i);
@@ -222,7 +233,7 @@ namespace mongo {
 
             flushMyDirectory(getJournalDir() / "file"); // flushes parent of argument (in this case journal dir)
 
-            log(1) << "removeJournalFiles end" << endl;
+            LOG(1) << "removeJournalFiles end" << endl;
         }
 
         /** at clean shutdown */
@@ -591,8 +602,8 @@ namespace mongo {
                 LSNFile lsnf;
                 lsnf.set(_lastFlushTime);
                 f.write(0, (char*)&lsnf, sizeof(lsnf));
-				// do we want to fsync here? if we do it probably needs to be async so the durthread
-				// is not delayed.
+                // do we want to fsync here? if we do it probably needs to be async so the durthread
+                // is not delayed.
             }
             catch(std::exception& e) {
                 log() << "warning: write to lsn file failed " << e.what() << endl;

@@ -19,13 +19,15 @@
 
 #pragma once
 
-#include "namespace-inl.h"
-#include "client.h"
-#include "../bson/util/atomic_int.h"
-#include "../util/concurrency/spin_lock.h"
-#include "../util/time_support.h"
-#include "../util/net/hostandport.h"
-#include "../util/progress_meter.h"
+#include <vector>
+
+#include "mongo/bson/util/atomic_int.h"
+#include "mongo/db/client.h"
+#include "mongo/db/namespace-inl.h"
+#include "mongo/util/concurrency/spin_lock.h"
+#include "mongo/util/net/hostandport.h"
+#include "mongo/util/progress_meter.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 
@@ -39,7 +41,21 @@ namespace mongo {
         void reset();
         
         string report( const CurOp& curop ) const;
-        void append( const CurOp& curop, BSONObjBuilder& b ) const;
+
+        /**
+         * Appends stored data and information from curop to the builder.
+         *
+         * @param curop information about the current operation which will be
+         *     use to append data to the builder.
+         * @param builder the BSON builder to use for appending data. Data can
+         *     still be appended even if this method returns false.
+         * @param maxSize the maximum allowed combined size for the query object
+         *     and update object
+         *
+         * @return false if the sum of the sizes for the query object and update
+         *     object exceeded maxSize
+         */
+        bool append(const CurOp& curop, BSONObjBuilder& builder, size_t maxSize) const;
 
         // -------------------
         
@@ -152,7 +168,7 @@ namespace mongo {
         ~CurOp();
 
         bool haveQuery() const { return _query.have(); }
-        BSONObj query() { return _query.get();  }
+        BSONObj query() const { return _query.get();  }
         void appendQuery( BSONObjBuilder& b , const StringData& name ) const { _query.append( b , name ); }
         
         void ensureStarted();
@@ -207,8 +223,9 @@ namespace mongo {
         string getMessage() const { return _message.toString(); }
         ProgressMeter& getProgressMeter() { return _progressMeter; }
         CurOp *parent() const { return _wrapped; }
-        void kill() { _killed = true; }
-        bool killed() const { return _killed; }
+        void kill(bool* pNotifyFlag = NULL); 
+        bool killPendingStrict() const { return _killPending.load(); }
+        bool killPending() const { return _killPending.loadRelaxed(); }
         void yielded() { _numYields++; }
         int numYields() const { return _numYields; }
         void suppressFromCurop() { _suppressFromCurop = true; }
@@ -220,6 +237,8 @@ namespace mongo {
         
         const LockStat& lockStat() const { return _lockStat; }
         LockStat& lockStat() { return _lockStat; }
+
+        void setKillWaiterFlags();
     private:
         friend class Client;
         void _reset();
@@ -241,42 +260,15 @@ namespace mongo {
         OpDebug _debug;
         ThreadSafeString _message;
         ProgressMeter _progressMeter;
-        volatile bool _killed;
+        AtomicInt32 _killPending;
         int _numYields;
         LockStat _lockStat;
+        // _notifyList is protected by the global killCurrentOp's mtx.
+        std::vector<bool*> _notifyList;
         
         // this is how much "extra" time a query might take
         // a writebacklisten for example will block for 30s 
         // so this should be 30000 in that case
         long long _expectedLatencyMs; 
-                                     
-
     };
-
-    /* _globalKill: we are shutting down
-       otherwise kill attribute set on specified CurOp
-       this class does not handle races between interruptJs and the checkForInterrupt functions - those must be
-       handled by the client of this class
-    */
-    extern class KillCurrentOp {
-    public:
-        void killAll();
-        void kill(AtomicUInt i);
-
-        /** @return true if global interrupt and should terminate the operation */
-        bool globalInterruptCheck() const { return _globalKill; }
-
-        /**
-         * @param heedMutex if true and have a write lock, won't kill op since it might be unsafe
-         */
-        void checkForInterrupt( bool heedMutex = true );
-
-        /** @return "" if not interrupted.  otherwise, you should stop. */
-        const char *checkForInterruptNoAssert();
-
-    private:
-        void interruptJs( AtomicUInt *op );
-        volatile bool _globalKill;
-    } killCurrentOp;
-
 }

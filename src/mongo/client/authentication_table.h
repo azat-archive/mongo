@@ -46,7 +46,7 @@ namespace mongo {
 
         Auth getAuthForDb( const std::string& dbname ) const;
 
-        // Takes the authentication state from the given BSONObj, replcacing whatever state it had.
+        // Takes the authentication state from the given BSONObj, replacing whatever state it had.
         void setFromBSON( const BSONObj& obj );
 
         BSONObj toBSON() const;
@@ -59,6 +59,9 @@ namespace mongo {
 
         static const string fieldName;
     private:
+
+        bool _shouldSendInternalSecurityTable() const;
+
         typedef map<std::string,Auth> DBAuthMap;
         DBAuthMap _dbs; // dbname -> auth
     };
