@@ -478,10 +478,10 @@ namespace mongo {
 
         if (!isFifoFile) {
 #if !defined(__sunos__) && defined(POSIX_FADV_SEQUENTIAL)
-                posix_fadvise(fileno(file), 0, fileLength, POSIX_FADV_SEQUENTIAL);
+            posix_fadvise(fileno(file), 0, fileLength, POSIX_FADV_SEQUENTIAL);
 #endif
 
-			  LOG(1) << "\t file size: " << fileLength << endl;
+			   LOG(1) << "\t file size: " << fileLength << endl;
         }
 
         unsigned long long num = 0;
