@@ -155,6 +155,8 @@ assert.soon(function() {
 doTest(new Mongo(st.rs0.getURL()), st.rs0.nodes, false);
 
 st.s.getDB('test').dropDatabase();
+// Hack until SERVER-7739 gets fixed
+st.rs0.awaitReplication();
 
 configDB.adminCommand({ enableSharding: 'test' });
 configDB.adminCommand({ shardCollection: 'test.user', key: { x: 1 }});
