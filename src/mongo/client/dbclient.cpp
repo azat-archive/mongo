@@ -36,6 +36,15 @@
 
 namespace mongo {
 
+    AtomicInt64 DBClientBase::ConnectionIdSequence;
+
+    bool hasReadPreference(const BSONObj& queryObj) {
+        const bool isQueryEmbedded = strcmp(queryObj.firstElement().fieldName(), "query") == 0;
+        const bool hasReadPrefOption = queryObj["$queryOptions"].isABSONObj() &&
+                        queryObj["$queryOptions"].Obj().hasField("$readPreference");
+        return (isQueryEmbedded && queryObj.hasField("$readPreference")) || hasReadPrefOption;
+    }
+
     void ConnectionString::_fillServers( string s ) {
         
         //
@@ -94,12 +103,12 @@ namespace mongo {
         case MASTER: {
             DBClientConnection * c = new DBClientConnection(true);
             c->setSoTimeout( socketTimeout );
-            log(1) << "creating new connection to:" << _servers[0] << endl;
+            LOG(1) << "creating new connection to:" << _servers[0] << endl;
             if ( ! c->connect( _servers[0] , errmsg ) ) {
                 delete c;
                 return 0;
             }
-            log(1) << "connected connection!" << endl;
+            LOG(1) << "connected connection!" << endl;
             return c;
         }
 
@@ -108,7 +117,7 @@ namespace mongo {
             DBClientReplicaSet * set = new DBClientReplicaSet( _setName , _servers , socketTimeout );
             if( ! set->connect() ) {
                 delete set;
-                errmsg = "connect failed to set ";
+                errmsg = "connect failed to replica set ";
                 errmsg += toString();
                 return 0;
             }
@@ -150,6 +159,45 @@ namespace mongo {
 
         verify( 0 );
         return 0;
+    }
+
+    bool ConnectionString::sameLogicalEndpoint( const ConnectionString& other ) const {
+        if ( _type != other._type )
+            return false;
+
+        switch ( _type ) {
+        case INVALID:
+            return true;
+        case MASTER:
+            return _servers[0] == other._servers[0];
+        case PAIR:
+            if ( _servers[0] == other._servers[0] )
+                return _servers[1] == other._servers[1];
+            return
+                ( _servers[0] == other._servers[1] ) &&
+                ( _servers[1] == other._servers[0] );
+        case SET:
+            return _setName == other._setName;
+        case SYNC:
+            // The servers all have to be the same in each, but not in the same order.
+            if ( _servers.size() != other._servers.size() )
+                return false;
+            for ( unsigned i = 0; i < _servers.size(); i++ ) {
+                bool found = false;
+                for ( unsigned j = 0; j < other._servers.size(); j++ ) {
+                    if ( _servers[i] == other._servers[j] ) {
+                        found = true;
+                        break;
+                    }
+                }
+                if ( ! found )
+                    return false;
+            }
+            return true;
+        case CUSTOM:
+            return _string == other._string;
+        }
+        verify( false );
     }
 
     ConnectionString ConnectionString::parse( const string& host , string& errmsg ) {
@@ -389,6 +437,14 @@ namespace mongo {
     }
 
     BSONObj DBClientWithCommands::getLastErrorDetailed(bool fsync, bool j, int w, int wtimeout) {
+        return getLastErrorDetailed("admin", fsync, j, w, wtimeout);
+    }
+
+    BSONObj DBClientWithCommands::getLastErrorDetailed(const std::string& db,
+                                                       bool fsync,
+                                                       bool j,
+                                                       int w,
+                                                       int wtimeout) {
         BSONObj info;
         BSONObjBuilder b;
         b.append( "getlasterror", 1 );
@@ -407,13 +463,21 @@ namespace mongo {
         if ( wtimeout > 0 )
             b.append( "wtimeout", wtimeout );
 
-        runCommand("admin", b.obj(), info);
+        runCommand(db, b.obj(), info);
 
         return info;
     }
 
     string DBClientWithCommands::getLastError(bool fsync, bool j, int w, int wtimeout) {
-        BSONObj info = getLastErrorDetailed(fsync, j, w, wtimeout);
+        return getLastError("admin", fsync, j, w, wtimeout);
+    }
+
+    string DBClientWithCommands::getLastError(const std::string& db,
+                                              bool fsync,
+                                              bool j,
+                                              int w,
+                                              int wtimeout) {
+        BSONObj info = getLastErrorDetailed(db, fsync, j, w, wtimeout);
         return getLastErrorString( info );
     }
 
@@ -753,24 +817,43 @@ namespace mongo {
             throw SocketException( SocketException::FAILED_STATE , toString() );
 
         lastReconnectTry = time(0);
-        log(_logLevel) << "trying reconnect to " << _serverString << endl;
+        LOG(_logLevel) << "trying reconnect to " << _serverString << endl;
         string errmsg;
         _failed = false;
         if ( ! _connect(errmsg) ) {
             _failed = true;
-            log(_logLevel) << "reconnect " << _serverString << " failed " << errmsg << endl;
+            LOG(_logLevel) << "reconnect " << _serverString << " failed " << errmsg << endl;
             throw SocketException( SocketException::CONNECT_ERROR , toString() );
         }
 
-        log(_logLevel) << "reconnect " << _serverString << " ok" << endl;
+        LOG(_logLevel) << "reconnect " << _serverString << " ok" << endl;
         for( map< string, pair<string,string> >::iterator i = authCache.begin(); i != authCache.end(); i++ ) {
             const char *dbname = i->first.c_str();
             const char *username = i->second.first.c_str();
             const char *password = i->second.second.c_str();
             if( !DBClientBase::auth(dbname, username, password, errmsg, false) )
-                log(_logLevel) << "reconnect: auth failed db:" << dbname << " user:" << username << ' ' << errmsg << '\n';
+                LOG(_logLevel) << "reconnect: auth failed db:" << dbname << " user:" << username << ' ' << errmsg << '\n';
         }
     }
+
+    void DBClientConnection::setSoTimeout(double timeout) {
+        _so_timeout = timeout;
+        if (p) {
+            p->setSocketTimeout(timeout);
+        }
+    }
+
+    uint64_t DBClientConnection::getSockCreationMicroSec() const {
+        if (p) {
+            return p->getSockCreationMicroSec();
+        }
+        else {
+            return INVALID_SOCK_CREATION_TIME;
+        }
+    }
+
+    const uint64_t DBClientBase::INVALID_SOCK_CREATION_TIME =
+            static_cast<uint64_t>(0xFFFFFFFFFFFFFFFFULL);
 
     auto_ptr<DBClientCursor> DBClientBase::query(const string &ns, Query query, int nToReturn,
             int nToSkip, const BSONObj *fieldsToReturn, int queryOptions , int batchSize ) {
@@ -992,7 +1075,7 @@ namespace mongo {
         if ( ! runCommand( nsToDatabase( ns.c_str() ) ,
                            BSON( "deleteIndexes" << NamespaceString( ns ).coll << "index" << indexName ) ,
                            info ) ) {
-            log(_logLevel) << "dropIndex failed: " << info << endl;
+            LOG(_logLevel) << "dropIndex failed: " << info << endl;
             uassert( 10007 ,  "dropIndex failed" , 0 );
         }
         resetIndexCache();
@@ -1044,7 +1127,14 @@ namespace mongo {
         return ss.str();
     }
 
-    bool DBClientWithCommands::ensureIndex( const string &ns , BSONObj keys , bool unique, const string & name , bool cache, bool background, int version ) {
+    bool DBClientWithCommands::ensureIndex( const string &ns,
+                                            BSONObj keys,
+                                            bool unique,
+                                            const string & name,
+                                            bool cache,
+                                            bool background,
+                                            int version,
+                                            int ttl ) {
         BSONObjBuilder toSave;
         toSave.append( "ns" , ns );
         toSave.append( "key" , keys );
@@ -1076,6 +1166,9 @@ namespace mongo {
 
         if ( cache )
             _seenIndexes.insert( cacheKey );
+
+        if ( ttl > 0 )
+            toSave.append( "expireAfterSeconds", ttl );
 
         insert( Namespace( ns.c_str() ).getSisterNS( "system.indexes"  ).c_str() , toSave.obj() );
         return 1;

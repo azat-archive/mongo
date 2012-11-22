@@ -315,7 +315,9 @@ namespace mongo {
                 bufSize += 128;
 
             BufBuilder b(bufSize);
-            time_t_to_String( time(0) , b.grow(20) );
+            char* dateStr = b.grow(24);
+            curTimeString(dateStr);
+            dateStr[23] = ' '; // change null char to space
 
             if (!threadName.empty()) {
                 b.appendChar( '[' );
@@ -336,10 +338,10 @@ namespace mongo {
                 stringstream sss;
                 sss << "warning: log line attempted (" << msg.size() / 1024 << "k) over max size(" << MAX_LOG_LINE / 1024 << "k)";
                 sss << ", printing beginning and end ... ";
-                b.appendStr( sss.str() );
+                b.appendStr( sss.str(), false );
                 const char * xx = msg.c_str();
                 b.appendBuf( xx , MAX_LOG_LINE / 3 );
-                b.appendStr( " .......... " );
+                b.appendStr( " .......... ", false );
                 b.appendStr( xx + msg.size() - ( MAX_LOG_LINE / 3 ) );
             }
             else {
@@ -417,10 +419,9 @@ namespace mongo {
         if( s.empty() ) return;
 
         char buf[64];
-        time_t_to_String( time(0) , buf );
-        /* truncate / don't show the year: */
-        buf[19] = ' ';
-        buf[20] = 0;
+        curTimeString(buf);
+        buf[23] = ' ';
+        buf[24] = 0;
 
         Logstream::logLockless(buf);
         Logstream::logLockless(s);

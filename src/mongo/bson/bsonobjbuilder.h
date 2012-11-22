@@ -30,6 +30,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bson_builder_base.h"
+#include "mongo/bson/bson_field.h"
 
 #if defined(_DEBUG) && defined(MONGO_EXPOSE_MACROS)
 #include "mongo/util/log.h"
@@ -41,48 +42,6 @@ namespace mongo {
 // warning: 'this' : used in base member initializer list
 #pragma warning( disable : 4355 )
 #endif
-
-    template<typename T>
-    class BSONFieldValue {
-    public:
-        BSONFieldValue( const std::string& name , const T& t ) {
-            _name = name;
-            _t = t;
-        }
-
-        const T& value() const { return _t; }
-        const std::string& name() const { return _name; }
-
-    private:
-        std::string _name;
-        T _t;
-    };
-
-    template<typename T>
-    class BSONField {
-    public:
-        BSONField( const std::string& name , const std::string& longName="" )
-            : _name(name), _longName(longName) {}
-        const std::string& name() const { return _name; }
-        operator std::string() const { return _name; }
-
-        BSONFieldValue<T> make( const T& t ) const {
-            return BSONFieldValue<T>( _name , t );
-        }
-
-        BSONFieldValue<BSONObj> gt( const T& t ) const { return query( "$gt" , t ); }
-        BSONFieldValue<BSONObj> lt( const T& t ) const { return query( "$lt" , t ); }
-
-        BSONFieldValue<BSONObj> query( const char * q , const T& t ) const;
-
-        BSONFieldValue<T> operator()( const T& t ) const {
-            return BSONFieldValue<T>( _name , t );
-        }
-
-    private:
-        std::string _name;
-        std::string _longName;
-    };
 
     /** Utility for creating a BSONObj.
         See also the BSON() and BSON_ARRAY() macros.
@@ -403,6 +362,10 @@ namespace mongo {
         BSONObjBuilder& append(const StringData& fieldName, const std::string& str) {
             return append(fieldName, str.c_str(), (int) str.size()+1);
         }
+        /** Append a string element */
+        BSONObjBuilder& append(const StringData& fieldName, const StringData& str) {
+            return append(fieldName, str.data(), (int) str.size()+1);
+        }
 
         BSONObjBuilder& appendSymbol(const StringData& fieldName, const StringData& symbol) {
             _b.appendNum((char) Symbol);
@@ -445,6 +408,13 @@ namespace mongo {
             return *this;
         }
 
+        /**
+         * To store an OpTime in BSON, use this function. Pass the OpTime as a Date, as follows:
+         *
+         *     builder.appendTimestamp("field", optime.asDate());
+         *
+         * This captures both the secs and inc fields.
+         */
         BSONObjBuilder& appendTimestamp( const StringData& fieldName , unsigned long long val ) {
             _b.appendNum( (char) Timestamp );
             _b.appendStr( fieldName );
@@ -805,6 +775,11 @@ namespace mongo {
 
         BSONArrayBuilder& appendTimestamp(unsigned int sec, unsigned int inc) {
             _b.appendTimestamp(num(), sec, inc);
+            return *this;
+        }
+
+        BSONArrayBuilder& append(const StringData& s) {
+            _b.append(num(), s);
             return *this;
         }
 

@@ -20,7 +20,7 @@
 #include "db.h"
 #include "dbhelpers.h"
 #include "json.h"
-#include "btree.h"
+#include "mongo/db/btreecursor.h"
 #include "pdfile.h"
 #include "oplog.h"
 #include "ops/update.h"
@@ -249,8 +249,9 @@ namespace mongo {
         }
         while( pat.more() ){
             BSONElement patElt = pat.next();
-            verify( patElt.isNumber() );
-            if( minOrMax * patElt.numberInt() == 1){
+            // for non 1/-1 field values, like {a : "hashed"}, treat order as ascending
+            int order = patElt.isNumber() ? patElt.numberInt() : 1;
+            if( minOrMax * order == 1 ){
                 newBound.appendMaxKey("");
             }
             else {
@@ -268,7 +269,12 @@ namespace mongo {
                                     bool secondaryThrottle ,
                                     RemoveCallback * callback,
                                     bool fromMigrate ) {
-        
+
+        Timer rangeRemoveTimer;
+
+        LOG(1) << "begin removal of " << min << " to " << max << " in " << ns
+               << (secondaryThrottle ? " (waiting for secondaries)" : "" ) << endl;
+
         Client& c = cc();
 
         long long numDeleted = 0;
@@ -300,7 +306,7 @@ namespace mongo {
                     int minOrMax = maxInclusive ? 1 : -1;
                     BSONObj newMax = Helpers::modifiedRangeBound( max , keyPattern , minOrMax );
                     
-                    c.reset( BtreeCursor::make( nsd , ii , i , newMin , newMax , maxInclusive , 1 ) );
+                    c.reset( BtreeCursor::make( nsd, i, newMin, newMax, maxInclusive, 1 ) );
                 }
                 
                 if ( ! c->ok() ) {
@@ -328,7 +334,7 @@ namespace mongo {
 
             Timer secondaryThrottleTime;
 
-            if ( secondaryThrottle ) {
+            if ( secondaryThrottle && numDeleted > 0 ) {
                 if ( ! waitForReplication( c.getLastOp(), 2, 60 /* seconds to wait */ ) ) {
                     warning() << "replication to secondaries for removeRange at least 60 seconds behind" << endl;
                 }
@@ -349,6 +355,9 @@ namespace mongo {
             log() << "Helpers::removeRangeUnlocked time spent waiting for replication: "  
                   << millisWaitingForReplication << "ms" << endl;
         
+        LOG(1) << "end removal of " << min << " to " << max << " in " << ns
+               << " (took " << rangeRemoveTimer.millis() << "ms)" << endl;
+
         return numDeleted;
     }
 
@@ -389,7 +398,7 @@ namespace mongo {
             _out = new ofstream();
             _out->open( _file.string().c_str() , ios_base::out | ios_base::binary );
             if ( ! _out->good() ) {
-                log( LL_WARNING ) << "couldn't create file: " << _file.string() << " for remove saving" << endl;
+                LOG( LL_WARNING ) << "couldn't create file: " << _file.string() << " for remove saving" << endl;
                 delete _out;
                 _out = 0;
                 return;

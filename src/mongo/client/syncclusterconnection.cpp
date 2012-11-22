@@ -42,19 +42,19 @@ namespace mongo {
             _connect( i->toString() );
     }
 
-    SyncClusterConnection::SyncClusterConnection( string commaSeperated, double socketTimeout)  : _mutex("SyncClusterConnection"), _socketTimeout( socketTimeout ) {
-        _address = commaSeperated;
+    SyncClusterConnection::SyncClusterConnection( string commaSeparated, double socketTimeout)  : _mutex("SyncClusterConnection"), _socketTimeout( socketTimeout ) {
+        _address = commaSeparated;
         string::size_type idx;
-        while ( ( idx = commaSeperated.find( ',' ) ) != string::npos ) {
-            string h = commaSeperated.substr( 0 , idx );
-            commaSeperated = commaSeperated.substr( idx + 1 );
+        while ( ( idx = commaSeparated.find( ',' ) ) != string::npos ) {
+            string h = commaSeparated.substr( 0 , idx );
+            commaSeparated = commaSeparated.substr( idx + 1 );
             _connect( h );
         }
-        _connect( commaSeperated );
+        _connect( commaSeparated );
         uassert( 8004 ,  "SyncClusterConnection needs 3 servers" , _conns.size() == 3 );
     }
 
-    SyncClusterConnection::SyncClusterConnection( string a , string b , string c, double socketTimeout)  : _mutex("SyncClusterConnection"), _socketTimeout( socketTimeout ) {
+    SyncClusterConnection::SyncClusterConnection( const std::string& a , const std::string& b , const std::string& c, double socketTimeout)  : _mutex("SyncClusterConnection"), _socketTimeout( socketTimeout ) {
         _address = a + "," + b + "," + c;
         // connect to all even if not working
         _connect( a );
@@ -141,12 +141,20 @@ namespace mongo {
     }
 
     BSONObj SyncClusterConnection::getLastErrorDetailed(bool fsync, bool j, int w, int wtimeout) {
-        if ( _lastErrors.size() )
-            return _lastErrors[0];
-        return DBClientBase::getLastErrorDetailed(fsync,j,w,wtimeout);
+        return getLastErrorDetailed("admin", fsync, j, w, wtimeout);
     }
 
-    void SyncClusterConnection::_connect( string host ) {
+    BSONObj SyncClusterConnection::getLastErrorDetailed(const std::string& db,
+                                                        bool fsync,
+                                                        bool j,
+                                                        int w,
+                                                        int wtimeout) {
+        if ( _lastErrors.size() )
+            return _lastErrors[0];
+        return DBClientBase::getLastErrorDetailed(db,fsync,j,w,wtimeout);
+    }
+
+    void SyncClusterConnection::_connect( const std::string& host ) {
         log() << "SyncClusterConnection connecting to [" << host << "]" << endl;
         DBClientConnection * c = new DBClientConnection( true );
         c->setSoTimeout( _socketTimeout );
@@ -323,7 +331,7 @@ namespace mongo {
                 log() << "query failed to: " << _conns[i]->toString() << " exception" << endl;
             }
         }
-        throw UserException( 8002 , "all servers down!" );
+        throw UserException( 8002 , str::stream() << "all servers down/unreachable when querying: " << _address );
     }
 
     auto_ptr<DBClientCursor> SyncClusterConnection::getMore( const string &ns, long long cursorId, int nToReturn, int options ) {
@@ -349,6 +357,11 @@ namespace mongo {
     }
 
     void SyncClusterConnection::insert( const string &ns, const vector< BSONObj >& v , int flags) {
+        if (v.size() == 1){
+            insert(ns, v[0], flags);
+            return;
+        }
+
         uassert( 10023 , "SyncClusterConnection bulk insert not implemented" , 0);
     }
 
@@ -436,7 +449,7 @@ namespace mongo {
                 log() << "call failed to: " << _conns[i]->toString() << " exception" << endl;
             }
         }
-        throw UserException( 8008 , "all servers down!" );
+        throw UserException( 8008 , str::stream() << "all servers down/unreachable: " << _address );
     }
 
     void SyncClusterConnection::say( Message &toSend, bool isRetry , string * actualServer ) {

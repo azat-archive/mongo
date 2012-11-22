@@ -41,16 +41,23 @@ namespace mongo {
     */
     class ScopedConn {
     public:
+        // A flag to keep ScopedConns open when all other sockets are disconnected
+        static const unsigned keepOpen;
+
         /** throws assertions if connect failure etc. */
-        ScopedConn(string hostport);
+        ScopedConn(const std::string& hostport);
         ~ScopedConn() {
             // conLock releases...
         }
         void reconnect() {
-            connInfo->cc.reset(new DBClientConnection(true, 0, 10));
+            connInfo->cc.reset(new DBClientConnection(true, 0, connInfo->getTimeout()));
             connInfo->cc->_logLevel = 2;
             connInfo->connected = false;
             connect();
+        }
+
+        void setTimeout(time_t timeout) {
+            connInfo->setTimeout(timeout);
         }
 
         /* If we were to run a query and not exhaust the cursor, future use of the connection would be problematic.
@@ -62,7 +69,7 @@ namespace mongo {
                         BSONObj &info,
                         int options=0,
                         const AuthenticationTable* auth=NULL) {
-            return conn()->runCommand(dbname, cmd, info, options, auth);
+            return conn()->runCommand(dbname, cmd, info, options, noauth ? NULL : auth);
         }
         unsigned long long count(const string &ns) {
             return conn()->count(ns);
@@ -79,10 +86,29 @@ namespace mongo {
             scoped_ptr<DBClientConnection> cc;
             bool connected;
             ConnectionInfo() : lock("ConnectionInfo"),
-                               cc(new DBClientConnection(/*reconnect*/ true, 0, /*timeout*/ 10.0)),
-                               connected(false) {
+                cc(new DBClientConnection(/*reconnect*/ true,
+                                          /*replicaSet*/ 0,
+                                          /*timeout*/ ReplSetConfig::DEFAULT_HB_TIMEOUT)),
+                connected(false) {
                 cc->_logLevel = 2;
             }
+
+            void tagPort() {
+                MessagingPort& mp = cc->port();
+                mp.tag |= ScopedConn::keepOpen;
+            }
+
+            void setTimeout(time_t timeout) {
+                _timeout = timeout;
+                cc->setSoTimeout(_timeout);
+            }
+
+            int getTimeout() {
+                return _timeout;
+            }
+
+        private:
+            int _timeout;
         } *connInfo;
         typedef map<string,ScopedConn::ConnectionInfo*> M;
         static M& _map;
@@ -97,6 +123,7 @@ namespace mongo {
             return false;
           }
           connInfo->connected = true;
+          connInfo->tagPort();
 
           // if we cannot authenticate against a member, then either its key file
           // or our key file has to change.  if our key file has to change, we'll
@@ -119,7 +146,7 @@ namespace mongo {
         }
     };
 
-    inline ScopedConn::ScopedConn(string hostport) : _hostport(hostport) {
+    inline ScopedConn::ScopedConn(const std::string& hostport) : _hostport(hostport) {
         bool first = false;
         {
             scoped_lock lk(mapMutex);
@@ -145,5 +172,4 @@ namespace mongo {
         // Keep trying to connect if we're not yet connected
         connect();
     }
-
 }

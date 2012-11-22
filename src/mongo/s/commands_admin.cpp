@@ -1,5 +1,3 @@
-// s/commands_admin.cpp
-
 /**
 *    Copyright (C) 2008 10gen Inc.
 *
@@ -16,38 +14,29 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-/* TODO
-   _ concurrency control.
-   _ limit() works right?
-   _ KillCursors
-
-   later
-   _ secondary indexes
-*/
-
 #include "pch.h"
-#include "../util/net/message.h"
-#include "../util/net/listen.h"
-#include "../util/processinfo.h"
-#include "../util/stringutils.h"
-#include "../util/version.h"
-#include "../util/timer.h"
 
-#include "../client/connpool.h"
+#include "mongo/db/commands.h"
+
+#include "mongo/client/connpool.h"
 #include "mongo/client/dbclientcursor.h"
-
-#include "../db/dbmessage.h"
-#include "../db/commands.h"
-#include "../db/stats/counters.h"
-
-#include "config.h"
-#include "chunk.h"
-#include "grid.h"
-#include "strategy.h"
-#include "stats.h"
-#include "writeback_listener.h"
-#include "client_info.h"
-#include "../util/ramlog.h"
+#include "mongo/db/dbmessage.h"
+#include "mongo/db/stats/counters.h"
+#include "mongo/s/chunk.h"
+#include "mongo/s/client_info.h"
+#include "mongo/s/cluster_constants.h"
+#include "mongo/s/config.h"
+#include "mongo/s/grid.h"
+#include "mongo/s/stats.h"
+#include "mongo/s/strategy.h"
+#include "mongo/s/writeback_listener.h"
+#include "mongo/util/net/message.h"
+#include "mongo/util/net/listen.h"
+#include "mongo/util/processinfo.h"
+#include "mongo/util/ramlog.h"
+#include "mongo/util/stringutils.h"
+#include "mongo/util/version.h"
+#include "mongo/util/timer.h"
 
 namespace mongo {
 
@@ -109,102 +98,6 @@ namespace mongo {
                 return true;
             }
         } flushRouterConfigCmd;
-
-
-        class ServerStatusCmd : public Command {
-        public:
-            ServerStatusCmd() : Command( "serverStatus" , true ) {
-                _started = time(0);
-            }
-
-            virtual bool slaveOk() const { return true; }
-            virtual LockType locktype() const { return NONE; }
-
-            bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-                result.append( "host" , prettyHostName() );
-                result.append("version", versionString);
-                result.append("process","mongos");
-                result.append("uptime",(double) (time(0)-_started));
-                result.appendDate( "localTime" , jsTime() );
-
-                {
-                    BSONObjBuilder t( result.subobjStart( "mem" ) );
-
-                    ProcessInfo p;
-                    if ( p.supported() ) {
-                        t.appendNumber( "resident" , p.getResidentSize() );
-                        t.appendNumber( "virtual" , p.getVirtualMemorySize() );
-                        t.appendBool( "supported" , true );
-                    }
-                    else {
-                        result.append( "note" , "not all mem info support on this platform" );
-                        t.appendBool( "supported" , false );
-                    }
-
-                    t.done();
-                }
-
-                {
-                    BSONObjBuilder bb( result.subobjStart( "connections" ) );
-                    bb.append( "current" , connTicketHolder.used() );
-                    bb.append( "available" , connTicketHolder.available() );
-                    bb.done();
-                }
-
-                {
-                    BSONObjBuilder bb( result.subobjStart( "extra_info" ) );
-                    bb.append("note", "fields vary by platform");
-                    ProcessInfo p;
-                    p.getExtraInfo(bb);
-                    bb.done();
-                }
-
-                result.append( "opcounters" , globalOpCounters.getObj() );
-                {
-                    BSONObjBuilder bb( result.subobjStart( "ops" ) );
-                    bb.append( "sharded" , opsSharded.getObj() );
-                    bb.append( "notSharded" , opsNonSharded.getObj() );
-                    bb.done();
-                }
-
-                result.append( "shardCursorType" , shardedCursorTypes.getObj() );
-
-                {
-                    BSONObjBuilder asserts( result.subobjStart( "asserts" ) );
-                    asserts.append( "regular" , assertionCount.regular );
-                    asserts.append( "warning" , assertionCount.warning );
-                    asserts.append( "msg" , assertionCount.msg );
-                    asserts.append( "user" , assertionCount.user );
-                    asserts.append( "rollovers" , assertionCount.rollovers );
-                    asserts.done();
-                }
-
-                {
-                    BSONObjBuilder bb( result.subobjStart( "network" ) );
-                    networkCounter.append( bb );
-                    bb.done();
-                }
-
-                {
-                    RamLog* rl = RamLog::get( "warnings" );
-                    verify(rl);
-                    
-                    if (rl->lastWrite() >= time(0)-(10*60)){ // only show warnings from last 10 minutes
-                        vector<const char*> lines;
-                        rl->get( lines );
-                        
-                        BSONArrayBuilder arr( result.subarrayStart( "warnings" ) );
-                        for ( unsigned i=std::max(0,(int)lines.size()-10); i<lines.size(); i++ )
-                            arr.append( lines[i] );
-                        arr.done();
-                    }
-                }
-
-                return 1;
-            }
-
-            time_t _started;
-        } cmdServerStatus;
 
         class FsyncCommand : public GridAdminCmd {
         public:
@@ -489,10 +382,35 @@ namespace mongo {
                     return false;
                 }
 
-                BSONForEach(e, proposedKey) {
-                    if (!e.isNumber() || e.number() != 1.0) {
-                        errmsg = "shard keys must all be ascending";
+                // Currently the allowable shard keys are either
+                // i) a hashed single field, e.g. { a : "hashed" }, or
+                // ii) a compound list of ascending fields, e.g. { a : 1 , b : 1 }
+                if ( proposedKey.firstElementType() == mongo::String ) {
+                    // case i)
+                    if ( !str::equals( proposedKey.firstElement().valuestrsafe() , "hashed" ) ) {
+                        errmsg = "unrecognized string: " + proposedKey.firstElement().str();
                         return false;
+                    }
+                    if ( proposedKey.nFields() > 1 ) {
+                        errmsg = "hashed shard keys currently only support single field keys";
+                        return false;
+                    }
+                    if ( cmdObj["unique"].trueValue() ) {
+                        // it's possible to ensure uniqueness on the hashed field by
+                        // declaring an additional (non-hashed) unique index on the field,
+                        // but the hashed shard key itself should not be declared unique
+                        errmsg = "hashed shard keys cannot be declared unique.";
+                        return false;
+                    }
+                } else {
+                    // case ii)
+                    BSONForEach(e, proposedKey) {
+                        if (!e.isNumber() || e.number() != 1.0) {
+                            errmsg = str::stream() << "Unsupported shard key pattern.  Pattern must"
+                                                   << " either be a single hashed field, or a list"
+                                                   << " of ascending fields.";
+                            return false;
+                        }
                     }
                 }
 
@@ -552,11 +470,11 @@ namespace mongo {
                 auto_ptr<DBClientCursor> uniqueQueryResult =
                                 conn->get()->query( indexNS , uniqueQuery );
 
+                ShardKeyPattern proposedShardKey( proposedKey );
                 while ( uniqueQueryResult->more() ) {
                     BSONObj idx = uniqueQueryResult->next();
                     BSONObj currentKey = idx["key"].embeddedObject();
-                    bool isCurrentID = str::equals( currentKey.firstElementFieldName() , "_id" );
-                    if( ! isCurrentID && ! proposedKey.isPrefixOf( currentKey) ) {
+                    if( ! proposedShardKey.isUniqueIndexCompatible( currentKey ) ) {
                         errmsg = str::stream() << "can't shard collection '" << ns << "' "
                                                << "with unique index on " << currentKey << " "
                                                << "and proposed shard key " << proposedKey << ". "
@@ -647,13 +565,130 @@ namespace mongo {
                     }
                 }
 
+                bool isEmpty = ( conn->get()->count( ns ) == 0 );
+
                 conn->done();
+
+                // Pre-splitting:
+                // For new collections which use hashed shard keys, we can can pre-split the
+                // range of possible hashes into a large number of chunks, and distribute them
+                // evenly at creation time. Until we design a better initialization scheme, the
+                // safest way to pre-split is to
+                // 1. make one big chunk for each shard
+                // 2. move them one at a time
+                // 3. split the big chunks to achieve the desired total number of initial chunks
+
+                vector<Shard> shards;
+                Shard primary = config->getPrimary();
+                primary.getAllShards( shards );
+                int numShards = shards.size();
+
+                vector<BSONObj> initSplits;  // there will be at most numShards-1 of these
+                vector<BSONObj> allSplits;   // all of the initial desired split points
+
+                bool isHashedShardKey =
+                        str::equals(proposedKey.firstElement().valuestrsafe(), "hashed");
+
+                // only pre-split when using a hashed shard key and collection is still empty
+                if ( isHashedShardKey && isEmpty ){
+
+                    int numChunks = cmdObj["numInitialChunks"].numberInt();
+                    if ( numChunks <= 0 )
+                        numChunks = 2*numShards;  // default number of initial chunks
+
+                    // hashes are signed, 64-bit ints. So we divide the range (-MIN long, +MAX long)
+                    // into intervals of size (2^64/numChunks) and create split points at the
+                    // boundaries.  The logic below ensures that initial chunks are all
+                    // symmetric around 0.
+                    long long intervalSize = ( std::numeric_limits<long long>::max()/ numChunks )*2;
+                    long long current = 0;
+                    if( numChunks % 2 == 0 ){
+                        allSplits.push_back( BSON(proposedKey.firstElementFieldName() << current) );
+                        current += intervalSize;
+                    } else {
+                        current += intervalSize/2;
+                    }
+                    for( int i=0; i < (numChunks-1)/2; i++ ){
+                        allSplits.push_back( BSON(proposedKey.firstElementFieldName() << current) );
+                        allSplits.push_back( BSON(proposedKey.firstElementFieldName() << -current));
+                        current += intervalSize;
+                    }
+                    sort( allSplits.begin() , allSplits.end() );
+
+                    // 1. the initial splits define the "big chunks" that we will subdivide later
+                    int lastIndex = -1;
+                    for ( int i = 1; i < numShards; i++ ){
+                        if ( lastIndex < (i*numChunks)/numShards - 1 ){
+                            lastIndex = (i*numChunks)/numShards - 1;
+                            initSplits.push_back( allSplits[ lastIndex ] );
+                        }
+                    }
+                }
 
                 tlog() << "CMD: shardcollection: " << cmdObj << endl;
 
-                config->shardCollection( ns , proposedKey , careAboutUnique );
+                config->shardCollection( ns , proposedKey , careAboutUnique , &initSplits );
 
                 result << "collectionsharded" << ns;
+
+                // only initially move chunks when using a hashed shard key
+                if (isHashedShardKey) {
+
+                    // Reload the new config info.  If we created more than one initial chunk, then
+                    // we need to move them around to balance.
+                    ChunkManagerPtr chunkManager = config->getChunkManager( ns , true );
+                    ChunkMap chunkMap = chunkManager->getChunkMap();
+                    if ( chunkMap.size() == 1 )
+                        return true;
+
+                    // 2. Move and commit each "big chunk" to a different shard.
+                    int i = 0;
+                    for ( ChunkMap::const_iterator c = chunkMap.begin(); c != chunkMap.end(); ++c,++i ){
+                        Shard to = shards[ i % numShards ];
+                        ChunkPtr chunk = c->second;
+
+                        // can't move chunk to shard it's already on
+                        if ( to == chunk->getShard() )
+                            continue;
+
+                        BSONObj moveResult;
+                        if ( ! chunk->moveAndCommit( to , Chunk::MaxChunkSize , false , moveResult ) ) {
+                            warning() << "Couldn't move chunk " << chunk << " to shard "  << to
+                                      << " while sharding collection " << ns << ". Reason: "
+                                      <<  moveResult << endl;
+                        }
+                    }
+
+                    // Reload the config info, after all the migrations
+                    chunkManager = config->getChunkManager( ns , true );
+
+                    // 3. Subdivide the big chunks by splitting at each of the points in "allSplits"
+                    //    that we haven't already split by.
+                    ChunkPtr currentChunk = chunkManager->findIntersectingChunk( allSplits[0] );
+                    vector<BSONObj> subSplits;
+                    for ( unsigned i = 0 ; i <= allSplits.size(); i++){
+                        if ( i == allSplits.size() || ! currentChunk->containsPoint( allSplits[i] ) ) {
+                            if ( ! subSplits.empty() ){
+                                BSONObj splitResult;
+                                if ( ! currentChunk->multiSplit( subSplits , splitResult ) ){
+                                    warning() << "Couldn't split chunk " << currentChunk
+                                              << " while sharding collection " << ns << ". Reason: "
+                                              << splitResult << endl;
+                                }
+                                subSplits.clear();
+                            }
+                            if ( i < allSplits.size() )
+                                currentChunk = chunkManager->findIntersectingChunk( allSplits[i] );
+                        } else {
+                            subSplits.push_back( allSplits[i] );
+                        }
+                    }
+
+                    // Proactively refresh the chunk manager. Not really necessary, but this way it's
+                    // immediately up-to-date the next time it's used.
+                    config->getChunkManager( ns , true );
+                }
+
                 return true;
             }
         } shardCollectionCmd;
@@ -740,7 +775,7 @@ namespace mongo {
                 }
 
                 ChunkManagerPtr info = config->getChunkManager( ns );
-                ChunkPtr chunk = info->findChunk( find );
+                ChunkPtr chunk = info->findChunkForDoc( find );
                 BSONObj middle = cmdObj.getObjectField( "middle" );
 
                 verify( chunk.get() );
@@ -835,7 +870,7 @@ namespace mongo {
                 tlog() << "CMD: movechunk: " << cmdObj << endl;
 
                 ChunkManagerPtr info = config->getChunkManager( ns );
-                ChunkPtr c = info->findChunk( find );
+                ChunkPtr c = info->findChunkForDoc( find );
                 const Shard& from = c->getShard();
 
                 if ( from == to ) {
@@ -872,7 +907,7 @@ namespace mongo {
                                                                            .getConnString() ) );
 
                 vector<BSONObj> all;
-                auto_ptr<DBClientCursor> cursor = conn->get()->query( "config.shards" , BSONObj() );
+                auto_ptr<DBClientCursor> cursor = conn->get()->query( ConfigNS::shard , BSONObj() );
                 while ( cursor->more() ) {
                     BSONObj o = cursor->next();
                     all.push_back( o );
@@ -935,8 +970,8 @@ namespace mongo {
 
                 // maxSize is the space usage cap in a shard in MBs
                 long long maxSize = 0;
-                if ( cmdObj[ ShardFields::maxSize.name() ].isNumber() ) {
-                    maxSize = cmdObj[ ShardFields::maxSize.name() ].numberLong();
+                if ( cmdObj[ ShardFields::maxSize() ].isNumber() ) {
+                    maxSize = cmdObj[ ShardFields::maxSize() ].numberLong();
                 }
 
                 if ( ! grid.addShard( &name , servers , maxSize , errmsg ) ) {
@@ -977,22 +1012,25 @@ namespace mongo {
                                                                            .getConnString() ) );
                 ScopedDbConnection& conn = *connPtr;
 
-                if (conn->count("config.shards", BSON("_id" << NE << s.getName() << ShardFields::draining(true)))){
+                if (conn->count(ConfigNS::shard,
+                                BSON(ShardFields::name() << NE << s.getName() <<
+                                     ShardFields::draining(true)))){
                     conn.done();
                     errmsg = "Can't have more than one draining shard at a time";
                     return false;
                 }
 
-                if (conn->count("config.shards", BSON("_id" << NE << s.getName())) == 0){
+                if (conn->count(ConfigNS::shard, BSON(ShardFields::name() << NE << s.getName())) == 0){
                     conn.done();
                     errmsg = "Can't remove last shard";
                     return false;
                 }
 
-                BSONObj primaryDoc = BSON( "_id" << NE << "local" << "primary" << s.getName() );
+                BSONObj primaryDoc = BSON(DatabaseFields::name.ne("local") <<
+                                          DatabaseFields::primary(s.getName()));
                 BSONObj dbInfo; // appended at end of result on success
                 {
-                    boost::scoped_ptr<DBClientCursor> cursor (conn->query("config.databases", primaryDoc));
+                    boost::scoped_ptr<DBClientCursor> cursor (conn->query(ConfigNS::database, primaryDoc));
                     if (cursor->more()) { // skip block and allocations if empty
                         BSONObjBuilder dbInfoBuilder;
                         dbInfoBuilder.append("note", "you need to drop or movePrimary these databases");
@@ -1000,7 +1038,7 @@ namespace mongo {
 
                         while (cursor->more()){
                             BSONObj db = cursor->nextSafe();
-                            dbs.append(db["_id"]);
+                            dbs.append(db[DatabaseFields::name()]);
                         }
                         dbs.doneFast();
 
@@ -1009,16 +1047,16 @@ namespace mongo {
                 }
 
                 // If the server is not yet draining chunks, put it in draining mode.
-                BSONObj searchDoc = BSON( "_id" << s.getName() );
-                BSONObj drainingDoc = BSON( "_id" << s.getName() << ShardFields::draining(true) );
-                BSONObj shardDoc = conn->findOne( "config.shards", drainingDoc );
+                BSONObj searchDoc = BSON(ShardFields::name() << s.getName());
+                BSONObj drainingDoc = BSON(ShardFields::name() << s.getName() << ShardFields::draining(true));
+                BSONObj shardDoc = conn->findOne(ConfigNS::shard, drainingDoc);
                 if ( shardDoc.isEmpty() ) {
 
                     // TODO prevent move chunks to this shard.
 
                     log() << "going to start draining shard: " << s.getName() << endl;
                     BSONObj newStatus = BSON( "$set" << BSON( ShardFields::draining(true) ) );
-                    conn->update( "config.shards" , searchDoc , newStatus, false /* do no upsert */);
+                    conn->update( ConfigNS::shard , searchDoc , newStatus, false /* do no upsert */);
 
                     errmsg = conn->getLastError();
                     if ( errmsg.size() ) {
@@ -1026,11 +1064,12 @@ namespace mongo {
                         return false;
                     }
 
-                    BSONObj primaryLocalDoc = BSON("_id" << "local" <<  "primary" << s.getName() );
+                    BSONObj primaryLocalDoc = BSON(DatabaseFields::name("local") <<
+                                                   DatabaseFields::primary(s.getName()));
                     PRINT(primaryLocalDoc);
-                    if (conn->count("config.databases", primaryLocalDoc)) {
+                    if (conn->count(ConfigNS::database, primaryLocalDoc)) {
                         log() << "This shard is listed as primary of local db. Removing entry." << endl;
-                        conn->remove("config.databases", BSON("_id" << "local"));
+                        conn->remove(ConfigNS::database, BSON(DatabaseFields::name("local")));
                         errmsg = conn->getLastError();
                         if ( errmsg.size() ) {
                             log() << "error removing local db: " << errmsg << endl;
@@ -1050,12 +1089,12 @@ namespace mongo {
 
                 // If the server has been completely drained, remove it from the ConfigDB.
                 // Check not only for chunks but also databases.
-                BSONObj shardIDDoc = BSON( "shard" << shardDoc[ "_id" ].str() );
-                long long chunkCount = conn->count( "config.chunks" , shardIDDoc );
-                long long dbCount = conn->count( "config.databases" , primaryDoc );
+                BSONObj shardIDDoc = BSON(ChunkFields::shard(shardDoc[ShardFields::name()].str()));
+                long long chunkCount = conn->count(ConfigNS::chunk, shardIDDoc);
+                long long dbCount = conn->count( ConfigNS::database , primaryDoc );
                 if ( ( chunkCount == 0 ) && ( dbCount == 0 ) ) {
                     log() << "going to remove shard: " << s.getName() << endl;
-                    conn->remove( "config.shards" , searchDoc );
+                    conn->remove( ConfigNS::shard , searchDoc );
 
                     errmsg = conn->getLastError();
                     if ( errmsg.size() ) {
@@ -1063,7 +1102,7 @@ namespace mongo {
                         return false;
                     }
 
-                    string shardName = shardDoc[ "_id" ].str();
+                    string shardName = shardDoc[ ShardFields::name() ].str();
                     Shard::removeShard( shardName );
                     shardConnectionPool.removeHost( shardName );
                     ReplicaSetMonitor::remove( shardName, true );

@@ -162,6 +162,7 @@ namespace mongo {
 
     void ShardingState::undoDonateChunk( const string& ns , const BSONObj& min , const BSONObj& max , ShardChunkVersion version ) {
         scoped_lock lk( _mutex );
+        log() << "ShardingState::undoDonateChunk acquired _mutex" << endl;
 
         ChunkManagersMap::const_iterator it = _chunks.find( ns );
         verify( it != _chunks.end() ) ;
@@ -633,9 +634,9 @@ namespace mongo {
             // TODO: Refactor all of this
             if ( version < globalVersion && version.hasCompatibleEpoch( globalVersion ) ) {
                 while ( shardingState.inCriticalMigrateSection() ) {
+                    log() << "waiting till out of critical section" << endl;
                     dbtemprelease r;
-                    sleepmillis(2);
-                    OCCASIONALLY log() << "waiting till out of critical section" << endl;
+                    shardingState.waitTillNotInCriticalSection( 10 );
                 }
                 errmsg = "shard global version for collection is higher than trying to set to '" + ns + "'";
                 result.append( "ns" , ns );
@@ -648,11 +649,10 @@ namespace mongo {
             if ( ! globalVersion.isSet() && ! authoritative ) {
                 // Needed b/c when the last chunk is moved off a shard, the version gets reset to zero, which
                 // should require a reload.
-                // TODO: Maybe a more elegant way of doing this
                 while ( shardingState.inCriticalMigrateSection() ) {
+                    log() << "waiting till out of critical section" << endl;
                     dbtemprelease r;
-                    sleepmillis(2);
-                    OCCASIONALLY log() << "waiting till out of critical section for version reset" << endl;
+                    shardingState.waitTillNotInCriticalSection( 10 );
                 }
 
                 // need authoritative for first look

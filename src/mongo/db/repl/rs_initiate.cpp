@@ -93,7 +93,7 @@ namespace mongo {
                     uasserted(13145, "set name does not match the set name host " + i->h.toString() + " expects");
                 if( *res.getStringField("set") ) {
                     if( cfg.version <= 1 ) {
-                        // this was to be initiation, no one shoudl be initiated already.
+                        // this was to be initiation, no one should be initiated already.
                         uasserted(13256, "member " + i->h.toString() + " is already initiated");
                     }
                     else {
@@ -224,17 +224,18 @@ namespace mongo {
 
             bool parsed = false;
             try {
-                ReplSetConfig newConfig(configObj);
+                scoped_ptr<ReplSetConfig> newConfig(ReplSetConfig::make(configObj));
                 parsed = true;
 
-                if( newConfig.version > 1 ) {
+                if( newConfig->version > 1 ) {
                     errmsg = "can't initiate with a version number greater than 1";
                     return false;
                 }
 
-                log() << "replSet replSetInitiate config object parses ok, " << newConfig.members.size() << " members specified" << rsLog;
+                log() << "replSet replSetInitiate config object parses ok, " <<
+                        newConfig->members.size() << " members specified" << rsLog;
 
-                checkMembersUpForConfigChange(newConfig, result, true);
+                checkMembersUpForConfigChange(*newConfig, result, true);
 
                 log() << "replSet replSetInitiate all members seem up" << rsLog;
 
@@ -242,7 +243,7 @@ namespace mongo {
 
                 Lock::GlobalWrite lk;
                 bo comment = BSON( "msg" << "initiating set");
-                newConfig.saveConfigLocally(comment);
+                newConfig->saveConfigLocally(comment);
                 log() << "replSet replSetInitiate config now saved locally.  Should come online in about a minute." << rsLog;
                 result.append("info", "Config now saved locally.  Should come online in about a minute.");
                 ReplSet::startupStatus = ReplSet::SOON;

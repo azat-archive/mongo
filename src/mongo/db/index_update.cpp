@@ -25,9 +25,11 @@
 #include "mongo/db/compact.h"
 #include "mongo/db/extsort.h"
 #include "mongo/db/index.h"
+#include "mongo/db/kill_current_op.h"
 #include "mongo/db/namespace_details.h"
 #include "mongo/db/pdfile_private.h"
 #include "mongo/db/replutil.h"
+#include "mongo/db/repl/rs.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/startup_test.h"
 
@@ -126,7 +128,13 @@ namespace mongo {
             BSONObjSet keys;
             for ( int i = 0; i < n; i++ ) {
                 // this call throws on unique constraint violation.  we haven't done any writes yet so that is fine.
-                fetchIndexInserters(/*out*/keys, inserter, d, i, obj, loc);
+                fetchIndexInserters(/*out*/keys, 
+                                    inserter, 
+                                    d, 
+                                    i, 
+                                    obj, 
+                                    loc, 
+                                    ignoreUniqueIndex(d->idx(i)));
                 if( keys.size() > 1 ) {
                     multi.push_back(i);
                     multiKeys.push_back(BSONObjSet());
@@ -143,12 +151,13 @@ namespace mongo {
             unsigned i = multi[j];
             BSONObjSet& keys = multiKeys[j];
             IndexDetails& idx = d->idx(i);
+            bool dupsAllowed = !idx.unique() || ignoreUniqueIndex(idx);
             IndexInterface& ii = idx.idxInterface();
             Ordering ordering = Ordering::make(idx.keyPattern());
             d->setIndexIsMultikey(ns, i);
             for( BSONObjSet::iterator k = ++keys.begin()/*skip 1*/; k != keys.end(); k++ ) {
                 try {
-                    ii.bt_insert(idx.head, loc, *k, ordering, !idx.unique(), idx);
+                    ii.bt_insert(idx.head, loc, *k, ordering, dupsAllowed, idx);
                 } catch (AssertionException& e) {
                     if( e.getCode() == 10287 && (int) i == d->nIndexes ) {
                         DEV log() << "info: caught key already in index on bg indexing (ok)" << endl;
@@ -162,7 +171,7 @@ namespace mongo {
                                 _unindexRecord(d->idx(j), obj, loc, false);
                             }
                             catch(...) {
-                                log(3) << "unindex fails on rollback after unique key constraint prevented insert\n";
+                                LOG(3) << "unindex fails on rollback after unique key constraint prevented insert\n";
                             }
                         }
                         throw;
@@ -206,20 +215,47 @@ namespace mongo {
         }
     }
 
-    SortPhaseOne *precalced = 0;
+    void addKeysToPhaseOne( const char* ns,
+                            const IndexDetails& idx,
+                            const BSONObj& order,
+                            SortPhaseOne* phaseOne,
+                            int64_t nrecords,
+                            ProgressMeter* progressMeter,
+                            bool mayInterrupt ) {
+        shared_ptr<Cursor> cursor = theDataFileMgr.findAll( ns );
+        phaseOne->sorter.reset( new BSONObjExternalSorter( idx.idxInterface(), order ) );
+        phaseOne->sorter->hintNumObjects( nrecords );
+        const IndexSpec& spec = idx.getSpec();
+        while ( cursor->ok() ) {
+            RARELY killCurrentOp.checkForInterrupt( !mayInterrupt );
+            BSONObj o = cursor->current();
+            DiskLoc loc = cursor->currLoc();
+            phaseOne->addKeys( spec, o, loc, mayInterrupt );
+            cursor->advance();
+            progressMeter->hit();
+            if ( logLevel > 1 && phaseOne->n % 10000 == 0 ) {
+                printMemInfo( "\t iterating objects" );
+            }
+        }
+    }
 
     template< class V >
-    void buildBottomUpPhases2And3(bool dupsAllowed, IndexDetails& idx, BSONObjExternalSorter& sorter, 
-        bool dropDups, set<DiskLoc> &dupsToDrop, CurOp * op, SortPhaseOne *phase1, ProgressMeterHolder &pm,
-        Timer& t
-        )
-    {
+    void buildBottomUpPhases2And3( bool dupsAllowed,
+                                   IndexDetails& idx,
+                                   BSONObjExternalSorter& sorter,
+                                   bool dropDups,
+                                   set<DiskLoc>& dupsToDrop,
+                                   CurOp* op,
+                                   SortPhaseOne* phase1,
+                                   ProgressMeterHolder& pm,
+                                   Timer& t,
+                                   bool mayInterrupt ) {
         BtreeBuilder<V> btBuilder(dupsAllowed, idx);
         BSONObj keyLast;
         auto_ptr<BSONObjExternalSorter::Iterator> i = sorter.iterator();
         verify( pm == op->setMessage( "index: (2/3) btree bottom up" , phase1->nkeys , 10 ) );
         while( i->more() ) {
-            RARELY killCurrentOp.checkForInterrupt();
+            RARELY killCurrentOp.checkForInterrupt( !mayInterrupt );
             BSONObjExternalSorter::Data d = i->next();
 
             try {
@@ -254,22 +290,45 @@ namespace mongo {
         }
         pm.finished();
         op->setMessage( "index: (3/3) btree-middle" );
-        log(t.seconds() > 10 ? 0 : 1 ) << "\t done building bottom layer, going to commit" << endl;
-        btBuilder.commit();
+        LOG(t.seconds() > 10 ? 0 : 1 ) << "\t done building bottom layer, going to commit" << endl;
+        btBuilder.commit( mayInterrupt );
         if ( btBuilder.getn() != phase1->nkeys && ! dropDups ) {
             warning() << "not all entries were added to the index, probably some keys were too large" << endl;
         }
     }
 
+    void doDropDups( const char* ns,
+                     NamespaceDetails* d,
+                     const set<DiskLoc>& dupsToDrop,
+                     bool mayInterrupt ) {
+        for( set<DiskLoc>::const_iterator i = dupsToDrop.begin(); i != dupsToDrop.end(); ++i ) {
+            RARELY killCurrentOp.checkForInterrupt( !mayInterrupt );
+            theDataFileMgr.deleteRecord( d,
+                                         ns,
+                                         i->rec(),
+                                         *i,
+                                         false /* cappedOk */,
+                                         true /* noWarn */,
+                                         isMaster( ns ) /* logOp */ );
+            getDur().commitIfNeeded();
+        }
+    }
+
+    SortPhaseOne* precalced = 0;
+
     // throws DBException
-    unsigned long long fastBuildIndex(const char *ns, NamespaceDetails *d, IndexDetails& idx, int idxNo) {
+    uint64_t fastBuildIndex(const char* ns,
+                            NamespaceDetails* d,
+                            IndexDetails& idx,
+                            int32_t idxNo,
+                            bool mayInterrupt) {
         CurOp * op = cc().curop();
 
         Timer t;
 
         tlog(1) << "fastBuildIndex " << ns << " idxNo:" << idxNo << ' ' << idx.info.obj().toString() << endl;
 
-        bool dupsAllowed = !idx.unique();
+        bool dupsAllowed = !idx.unique() || ignoreUniqueIndex(idx);
         bool dropDups = idx.dropDups() || inDBRepair;
         BSONObj order = idx.keyPattern();
 
@@ -283,21 +342,7 @@ namespace mongo {
         SortPhaseOne *phase1 = precalced;
         if( phase1 == 0 ) {
             phase1 = &_ours;
-            SortPhaseOne& p1 = *phase1;
-            shared_ptr<Cursor> c = theDataFileMgr.findAll(ns);
-            p1.sorter.reset( new BSONObjExternalSorter(idx.idxInterface(), order) );
-            p1.sorter->hintNumObjects( d->stats.nrecords );
-            const IndexSpec& spec = idx.getSpec();
-            while ( c->ok() ) {
-                BSONObj o = c->current();
-                DiskLoc loc = c->currLoc();
-                p1.addKeys(spec, o, loc);
-                c->advance();
-                pm.hit();
-                if ( logLevel > 1 && p1.n % 10000 == 0 ) {
-                    printMemInfo( "\t iterating objects" );
-                }
-            };
+            addKeysToPhaseOne( ns, idx, order, phase1, d->stats.nrecords, pm.get(), mayInterrupt );
         }
         pm.finished();
 
@@ -309,28 +354,43 @@ namespace mongo {
             d->setIndexIsMultikey(ns, idxNo);
 
         if ( logLevel > 1 ) printMemInfo( "before final sort" );
-        phase1->sorter->sort();
+        phase1->sorter->sort( mayInterrupt );
         if ( logLevel > 1 ) printMemInfo( "after final sort" );
 
-        log(t.seconds() > 5 ? 0 : 1) << "\t external sort used : " << sorter.numFiles() << " files " << " in " << t.seconds() << " secs" << endl;
+        LOG(t.seconds() > 5 ? 0 : 1) << "\t external sort used : " << sorter.numFiles() << " files " << " in " << t.seconds() << " secs" << endl;
 
         set<DiskLoc> dupsToDrop;
 
         /* build index --- */
         if( idx.version() == 0 )
-            buildBottomUpPhases2And3<V0>(dupsAllowed, idx, sorter, dropDups, dupsToDrop, op, phase1, pm, t);
+            buildBottomUpPhases2And3<V0>(dupsAllowed,
+                                         idx,
+                                         sorter,
+                                         dropDups,
+                                         dupsToDrop,
+                                         op,
+                                         phase1,
+                                         pm,
+                                         t,
+                                         mayInterrupt);
         else if( idx.version() == 1 ) 
-            buildBottomUpPhases2And3<V1>(dupsAllowed, idx, sorter, dropDups, dupsToDrop, op, phase1, pm, t);
+            buildBottomUpPhases2And3<V1>(dupsAllowed,
+                                         idx,
+                                         sorter,
+                                         dropDups,
+                                         dupsToDrop,
+                                         op,
+                                         phase1,
+                                         pm,
+                                         t,
+                                         mayInterrupt);
         else
             verify(false);
 
         if( dropDups ) 
             log() << "\t fastBuildIndex dupsToDrop:" << dupsToDrop.size() << endl;
 
-        for( set<DiskLoc>::iterator i = dupsToDrop.begin(); i != dupsToDrop.end(); i++ ){
-            theDataFileMgr.deleteRecord( ns, i->rec(), *i, false /* cappedOk */ , true /* noWarn */ , isMaster( ns ) /* logOp */ );
-            getDur().commitIfNeeded();
-        }
+        doDropDups(ns, d, dupsToDrop, mayInterrupt);
 
         return phase1->n;
     }
@@ -375,7 +435,7 @@ namespace mongo {
                         bool ok = cc->advance();
                         ClientCursor::YieldData yieldData;
                         massert( 16093, "after yield cursor deleted" , cc->prepareToYield( yieldData ) );
-                        theDataFileMgr.deleteRecord( ns, toDelete.rec(), toDelete, false, true , true );
+                        theDataFileMgr.deleteRecord( d, ns, toDelete.rec(), toDelete, false, true , true );
                         if( !cc->recoverFromYield( yieldData ) ) {
                             cc.release();
                             if( !ok ) {
@@ -455,45 +515,25 @@ namespace mongo {
         }
     };
 
-    /**
-     * For the lifetime of this object, an index build is indicated on the specified
-     * namespace and the newest index is marked as absent.  This simplifies
-     * the cleanup required on recovery.
-     */
-    class RecoverableIndexState {
-    public:
-        RecoverableIndexState( NamespaceDetails *d ) : _d( d ) {
-            indexBuildInProgress() = 1;
-            nIndexes()--;
-        }
-        ~RecoverableIndexState() {
-            DESTRUCTOR_GUARD (
-                nIndexes()++;
-                indexBuildInProgress() = 0;
-            )
-        }
-    private:
-        int &nIndexes() { return getDur().writingInt( _d->nIndexes ); }
-        int &indexBuildInProgress() { return getDur().writingInt( _d->indexBuildInProgress ); }
-        NamespaceDetails *_d;
-    };
-
     // throws DBException
-    void buildAnIndex(string ns, NamespaceDetails *d, IndexDetails& idx, int idxNo, bool background) {
+    void buildAnIndex(const std::string& ns,
+                      NamespaceDetails* d,
+                      IndexDetails& idx,
+                      int32_t idxNo,
+                      bool background,
+                      bool mayInterrupt) {
         tlog() << "build index " << ns << ' ' << idx.keyPattern() << ( background ? " background" : "" ) << endl;
         Timer t;
         unsigned long long n;
 
         verify( !BackgroundOperation::inProgForNs(ns.c_str()) ); // should have been checked earlier, better not be...
-        verify( d->indexBuildInProgress == 0 );
         verify( Lock::isWriteLocked(ns) );
-        RecoverableIndexState recoverable( d );
 
         // Build index spec here in case the collection is empty and the index details are invalid
         idx.getSpec();
 
         if( inDBRepair || !background ) {
-            n = fastBuildIndex(ns.c_str(), d, idx, idxNo);
+            n = fastBuildIndex(ns.c_str(), d, idx, idxNo, mayInterrupt);
             verify( !idx.head.isNull() );
         }
         else {
@@ -522,7 +562,7 @@ namespace mongo {
                         _unindexRecord(d->idx(j), obj, loc, false);
                     }
                     catch(...) {
-                        log(3) << "unindex fails on rollback after unique failure\n";
+                        LOG(3) << "unindex fails on rollback after unique failure\n";
                     }
                 }
                 throw;
@@ -533,7 +573,7 @@ namespace mongo {
 
     extern BSONObj id_obj; // { _id : 1 }
 
-    void ensureHaveIdIndex(const char *ns) {
+    void ensureHaveIdIndex(const char* ns, bool mayInterrupt) {
         NamespaceDetails *d = nsdetails(ns);
         if ( d == 0 || d->isSystemFlagSet(NamespaceDetails::Flag_HaveIdIndex) )
             return;
@@ -557,7 +597,7 @@ namespace mongo {
         BSONObj o = b.done();
 
         /* edge case: note the insert could fail if we have hit maxindexes already */
-        theDataFileMgr.insert(system_indexes.c_str(), o.objdata(), o.objsize(), true);
+        theDataFileMgr.insert(system_indexes.c_str(), o.objdata(), o.objsize(), mayInterrupt, true);
     }
 
     /* remove bit from a bit array - actually remove its slot, not a clear
@@ -596,7 +636,7 @@ namespace mongo {
 
         // delete a specific index or all?
         if ( *name == '*' && name[1] == 0 ) {
-            log(4) << "  d->nIndexes was " << d->nIndexes << '\n';
+            LOG(4) << "  d->nIndexes was " << d->nIndexes << '\n';
             anObjBuilder.append("nIndexesWas", (double)d->nIndexes);
             IndexDetails *idIndex = 0;
             if( d->nIndexes ) {
@@ -611,7 +651,8 @@ namespace mongo {
                 d->nIndexes = 0;
             }
             if ( idIndex ) {
-                d->addIndex(ns) = *idIndex;
+                d->getNextIndexDetails(ns) = *idIndex;
+                d->addIndex(ns);
                 wassert( d->nIndexes == 1 );
             }
             /* assuming here that id index is not multikey: */
@@ -625,7 +666,7 @@ namespace mongo {
             // delete just one index
             int x = d->findIndexByName(name);
             if ( x >= 0 ) {
-                log(4) << "  d->nIndexes was " << d->nIndexes << endl;
+                LOG(4) << "  d->nIndexes was " << d->nIndexes << endl;
                 anObjBuilder.append("nIndexesWas", (double)d->nIndexes);
 
                 /* note it is  important we remove the IndexDetails with this

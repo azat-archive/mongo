@@ -28,6 +28,11 @@
  */
 namespace mongo {
 
+    void* remapPrivateView(void *oldPrivateAddr) {
+        log() << "remapPrivateView called in mongos, aborting" << endl;
+        fassertFailed(16462);
+    }
+
     void ShardingConnectionHook::onHandedOut( DBClientBase * conn ) {
         if( _shardedConnections ){
             ClientInfo::get()->addShard( conn->getServerAddress() );
@@ -39,24 +44,25 @@ namespace mongo {
     LockState::LockState(){} // ugh
 
     Client::Client(const char *desc , AbstractMessagingPort *p) :
+        ClientBasic(p),
         _context(0),
         _shutdown(false),
         _desc(desc),
         _god(0),
-        _lastOp(0),
-        _mp(p) {
+        _lastOp(0) {
     }
     Client::~Client() {}
     bool Client::shutdown() { return true; }
 
-    static unsigned long long nThreads = 0;
-    void assertStartingUp() {
-        dassert( nThreads <= 1 );
-    }
     Client& Client::initThread(const char *desc, AbstractMessagingPort *mp) {
-        DEV nThreads++; // never decremented.  this is for casi class asserts
+        // mp is non-null only for client connections, and mongos uses ClientInfo for those
+        massert(16478, "Client being used for incoming connection thread in mongos", mp == NULL);
         setThreadName(desc);
         verify( currentClient.get() == 0 );
+        // mp is always NULL in mongos. Threads for client connections use ClientInfo in mongos
+        massert(16482,
+                "Non-null messaging port provided to Client::initThread in a mongos",
+                mp == NULL);
         Client *c = new Client(desc, mp);
         currentClient.reset(c);
         mongo::lastError.initThread();
@@ -94,7 +100,7 @@ namespace mongo {
                 log() << "command denied: " << cmdObj.toString() << endl;
                 return false;
             }
-            log( 2 ) << "command: " << cmdObj << endl;
+            LOG( 2 ) << "command: " << cmdObj << endl;
         }
 
         if (!client.getAuthenticationInfo()->isAuthorized(dbname)) {

@@ -1,6 +1,7 @@
 // distinct.cpp
 
 /**
+*    Copyright (C) 2012 10gen Inc.
 *
 *    This program is free software: you can redistribute it and/or  modify
 *    it under the terms of the GNU Affero General Public License, version 3,
@@ -15,11 +16,11 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-//#include "pch.h"
-#include "../commands.h"
-#include "../instance.h"
-#include "../clientcursor.h"
-#include "../../util/timer.h"
+#include "mongo/db/clientcursor.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/instance.h"
+#include "mongo/db/kill_current_op.h"
+#include "mongo/util/timer.h"
 
 namespace mongo {
 

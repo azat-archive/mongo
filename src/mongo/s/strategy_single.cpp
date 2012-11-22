@@ -47,11 +47,31 @@ namespace mongo {
                         BSONObj cmdObj = q.query;
                         {
                             BSONElement e = cmdObj.firstElement();
-                            if ( e.type() == Object && (e.fieldName()[0] == '$'
+                            if (e.type() == Object && (e.fieldName()[0] == '$'
                                                          ? str::equals("query", e.fieldName()+1)
-                                                         : str::equals("query", e.fieldName())))
-                                cmdObj = e.embeddedObject();
+                                                         : str::equals("query", e.fieldName()))) {
+                                // Extract the embedded query object.
+
+                                if (cmdObj.hasField("$readPreference")) {
+                                    // The command has a read preference setting. We don't want
+                                    // to lose this information so we copy this to a new field
+                                    // called $queryOptions.$readPreference
+                                    BSONObjBuilder finalCmdObjBuilder;
+                                    finalCmdObjBuilder.appendElements(e.embeddedObject());
+
+                                    BSONObjBuilder queryOptionsBuilder(
+                                            finalCmdObjBuilder.subobjStart("$queryOptions"));
+                                    queryOptionsBuilder.append(cmdObj["$readPreference"]);
+                                    queryOptionsBuilder.done();
+
+                                    cmdObj = finalCmdObjBuilder.obj();
+                                }
+                                else {
+                                    cmdObj = e.embeddedObject();
+                                }
+                            }
                         }
+
                         bool ok = Command::runAgainstRegistered(q.ns, cmdObj, builder, q.queryOptions);
                         if ( ok ) {
                             BSONObj x = builder.done();
@@ -189,7 +209,7 @@ namespace mongo {
                 b.append( "err" , "can't do unlock through mongos" );
             }
             else {
-                log( LL_WARNING ) << "unknown sys command [" << ns << "]" << endl;
+                LOG( LL_WARNING ) << "unknown sys command [" << ns << "]" << endl;
                 return false;
             }
 

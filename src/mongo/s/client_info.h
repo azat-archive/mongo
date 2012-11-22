@@ -27,6 +27,8 @@
 
 namespace mongo {
 
+    class AbstractMessagingPort;
+
     /**
      * holds information about a client connected to a mongos
      * 1 per client socket
@@ -34,7 +36,7 @@ namespace mongo {
      */
     class ClientInfo : public ClientBasic {
     public:
-        ClientInfo();
+        ClientInfo(AbstractMessagingPort* messagingPort);
         ~ClientInfo();
 
         /** new request on behalf of a client, adjusts internal state */
@@ -99,7 +101,14 @@ namespace mongo {
 
         void noAutoSplit() { _autoSplitOk = false; }
 
-        static ClientInfo * get();
+        // Returns whether or not a ClientInfo for this thread has already been created and stored
+        // in _tlInfo.
+        static bool exists();
+        // Gets the ClientInfo object for this thread from _tlInfo. If no ClientInfo object exists
+        // yet for this thread, it creates one.
+        static ClientInfo * get(AbstractMessagingPort* messagingPort = NULL);
+        // Creates a ClientInfo and stores it in _tlInfo
+        static ClientInfo* create(AbstractMessagingPort* messagingPort);
         const AuthenticationInfo* getAuthenticationInfo() const { return (AuthenticationInfo*)&_ai; }
         AuthenticationInfo* getAuthenticationInfo() { return (AuthenticationInfo*)&_ai; }
         bool isAdmin() { return _ai.isAuthorized( "admin" ); }
@@ -111,6 +120,10 @@ namespace mongo {
             WriteBackListener::ConnectionIdent ident;
             OID id;
         };
+
+        // Used to set up this thread's AuthorizationManager.  Should be called during the
+        // initialization of this ClientInfo.
+        void _setupAuth();
 
         // for getLastError
         void _addWriteBack( vector<WBInfo>& all , const BSONObj& o );

@@ -15,16 +15,21 @@
  *    limitations under the License.
  */
 
-#include "v8_wrapper.h"
-#include "v8_utils.h"
-#include "engine_v8.h"
-#include "v8_db.h"
-#include "util/base64.h"
-#include "util/text.h"
-#include "../client/syncclusterconnection.h"
-#include "../s/d_logic.h"
-#include "../db/namespacestring.h"
+#include "mongo/scripting/v8_db.h"
+
 #include <iostream>
+#include <boost/scoped_array.hpp>
+
+#include "mongo/base/init.h"
+#include "mongo/client/syncclusterconnection.h"
+#include "mongo/db/namespacestring.h"
+#include "mongo/s/d_logic.h"
+#include "mongo/scripting/engine_v8.h"
+#include "mongo/scripting/v8_utils.h"
+#include "mongo/scripting/v8_wrapper.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/base64.h"
+#include "mongo/util/text.h"
 
 using namespace std;
 using namespace v8;
@@ -32,6 +37,29 @@ using namespace v8;
 namespace mongo {
 
 #define DDD(x)
+
+namespace {
+    std::vector<V8FunctionPrototypeManipulatorFn> _mongoPrototypeManipulators;
+    bool _mongoPrototypeManipulatorsFrozen = false;
+
+    MONGO_INITIALIZER(V8MongoPrototypeManipulatorRegistry)(InitializerContext* context) {
+        return Status::OK();
+    }
+
+    MONGO_INITIALIZER_WITH_PREREQUISITES(V8MongoPrototypeManipulatorRegistrationDone,
+                                         ("V8MongoPrototypeManipulatorRegistry"))
+        (InitializerContext* context) {
+
+        _mongoPrototypeManipulatorsFrozen = true;
+        return Status::OK();
+    }
+
+}  // namespace
+
+    void v8RegisterMongoPrototypeManipulator(const V8FunctionPrototypeManipulatorFn& manipulator) {
+        fassert(16467, !_mongoPrototypeManipulatorsFrozen);
+        _mongoPrototypeManipulators.push_back(manipulator);
+    }
 
     static v8::Handle<v8::Value> newInstance( v8::Function* f, const v8::Arguments& args ) {
         // need to translate arguments into an array
@@ -59,6 +87,10 @@ namespace mongo {
         scope->injectV8Function("update", mongoUpdate, proto);
         scope->injectV8Function("auth", mongoAuth, proto);
         scope->injectV8Function("logout", mongoLogout, proto);
+
+        fassert(16468, _mongoPrototypeManipulatorsFrozen);
+        for (size_t i = 0; i < _mongoPrototypeManipulators.size(); ++i)
+            _mongoPrototypeManipulators[i](scope, mongo);
 
         v8::Handle<FunctionTemplate> ic = scope->createV8Function(internalCursorCons);
         ic->InstanceTemplate()->SetInternalFieldCount( 1 );
@@ -258,11 +290,7 @@ namespace mongo {
 
     // ---
 
-#ifdef _WIN32
-#define GETNS char * ns = new char[args[0]->ToString()->Utf8Length()];  args[0]->ToString()->WriteUtf8( ns );
-#else
-#define GETNS char ns[args[0]->ToString()->Utf8Length()];  args[0]->ToString()->WriteUtf8( ns );
-#endif
+#define GETNS boost::scoped_array<char> ns(new char[args[0]->ToString()->Utf8Length()+1]); args[0]->ToString()->WriteUtf8( ns.get() );
 
     DBClientBase * getConnection( const Arguments& args ) {
         Local<External> c = External::Cast( *(args.This()->GetInternalField( 0 )) );
@@ -312,7 +340,7 @@ namespace mongo {
             int options = (int)(args[6]->ToNumber()->Value());
             {
                 //V8Unlock u;
-                cursor = conn->query( ns, q ,  nToReturn , nToSkip , haveFields ? &fields : 0, options , batchSize );
+                cursor = conn->query( ns.get(), q ,  nToReturn , nToSkip , haveFields ? &fields : 0, options , batchSize );
                 if ( ! cursor.get() ) 
                     return v8::ThrowException( v8::String::New( "error doing query: failed" ) );
             }
@@ -333,7 +361,7 @@ namespace mongo {
     }
 
     v8::Handle<v8::Value> mongoInsert(V8Scope* scope, const v8::Arguments& args) {
-        jsassert( args.Length() == 2 , "insert needs 2 args" );
+        jsassert( args.Length() == 3 , "insert needs 3 args" );
         jsassert( args[1]->IsObject() , "have to insert an object" );
 
         if ( args.This()->Get( scope->getV8Str( "readOnly" ) )->BooleanValue() )
@@ -343,6 +371,7 @@ namespace mongo {
         GETNS;
 
         v8::Handle<v8::Object> in = args[1]->ToObject();
+        v8::Handle<v8::Integer> flags = args[2]->ToInteger();
 
         if( args[1]->IsArray() ){
 
@@ -366,7 +395,7 @@ namespace mongo {
             DDD( "want to save batch : " << bos.length );
             try {
                 //V8Unlock u;
-                conn->insert( ns , bos );
+                conn->insert( ns.get() , bos, flags->Int32Value() );
             }
             catch ( ... ) {
                 return v8::ThrowException( v8::String::New( "socket error on bulk insert" ) );
@@ -385,7 +414,7 @@ namespace mongo {
             DDD( "want to save : " << o.jsonString() );
             try {
                 //V8Unlock u;
-                conn->insert( ns , o );
+                conn->insert( ns.get() , o );
             }
             catch ( ... ) {
                 return v8::ThrowException( v8::String::New( "socket error on insert" ) );
@@ -417,7 +446,7 @@ namespace mongo {
         DDD( "want to remove : " << o.jsonString() );
         try {
             //V8Unlock u;
-            conn->remove( ns , o , justOne );
+            conn->remove( ns.get() , o , justOne );
         }
         catch ( ... ) {
             return v8::ThrowException( v8::String::New( "socket error on remove" ) );
@@ -447,7 +476,7 @@ namespace mongo {
             BSONObj q1 = scope->v8ToMongo( q );
             BSONObj o1 = scope->v8ToMongo( o );
             //V8Unlock u;
-            conn->update( ns , q1 , o1 , upsert, multi );
+            conn->update( ns.get() , q1 , o1 , upsert, multi );
         }
         catch ( ... ) {
             return v8::ThrowException( v8::String::New( "socket error on remove" ) );

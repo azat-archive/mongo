@@ -61,7 +61,7 @@ namespace mongo {
      * unique name across the system (e.g., "balancer"). A lock is taken by writing a document in the configdb's locks
      * collection with that name.
      *
-     * To be maintained, each taken lock needs to be revalidaded ("pinged") within a pre-established amount of time. This
+     * To be maintained, each taken lock needs to be revalidated ("pinged") within a pre-established amount of time. This
      * class does this maintenance automatically once a DistributedLock object was constructed.
      */
     class DistributedLock {
@@ -162,7 +162,6 @@ namespace mongo {
 
         const ConnectionString _conn;
         const string _name;
-        const BSONObj _id;
         const string _processId;
 
         // Timeout for lock, usually LOCK_TIMEOUT
@@ -218,7 +217,7 @@ namespace mongo {
     	    return *this;
     	}
 
-        dist_lock_try( DistributedLock * lock , string why )
+        dist_lock_try( DistributedLock * lock , const std::string& why )
             : _lock(lock), _why(why) {
             _got = _lock->lock_try( why , false , &_other );
         }

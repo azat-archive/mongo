@@ -1,6 +1,7 @@
 // dbcommands.cpp
 
 /**
+*    Copyright (C) 2012 10gen Inc.
 *
 *    This program is free software: you can redistribute it and/or  modify
 *    it under the terms of the GNU Affero General Public License, version 3,
@@ -17,40 +18,38 @@
 
 /* SHARDING: 
    I believe this file is for mongod only.
-   See s/commnands_public.cpp for mongos.
+   See s/commands_public.cpp for mongos.
 */
 
-#include "pch.h"
-#include "ops/count.h"
-#include "pdfile.h"
-#include "jsobj.h"
-#include "../bson/util/builder.h"
+#include "mongo/pch.h"
+
 #include <time.h>
-#include "introspect.h"
-#include "btree.h"
-#include "../util/lruishmap.h"
-#include "../util/md5.hpp"
-#include "../util/processinfo.h"
-#include "../util/ramlog.h"
-#include "json.h"
-#include "repl.h"
-#include "repl_block.h"
-#include "replutil.h"
-#include "commands.h"
-#include "db.h"
-#include "instance.h"
-#include "lasterror.h"
-#include "security.h"
-#include "queryoptimizer.h"
-#include "../scripting/engine.h"
-#include "stats/counters.h"
-#include "background.h"
-#include "../util/version.h"
-#include "../s/d_writeback.h"
-#include "dur_stats.h"
-#include "../server.h"
+
+#include "mongo/bson/util/builder.h"
+#include "mongo/db/background.h"
+#include "mongo/db/btreecursor.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/db.h"
+#include "mongo/db/dur_stats.h"
 #include "mongo/db/index_update.h"
-#include "mongo/db/repl/bgsync.h"
+#include "mongo/db/instance.h"
+#include "mongo/db/introspect.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/db/json.h"
+#include "mongo/db/kill_current_op.h"
+#include "mongo/db/lasterror.h"
+#include "mongo/db/ops/count.h"
+#include "mongo/db/pdfile.h"
+#include "mongo/db/queryoptimizer.h"
+#include "mongo/db/repl.h"
+#include "mongo/db/repl_block.h"
+#include "mongo/db/replutil.h"
+#include "mongo/db/security.h"
+#include "mongo/s/d_writeback.h"
+#include "mongo/scripting/engine.h"
+#include "mongo/server.h"
+#include "mongo/util/lruishmap.h"
+#include "mongo/util/md5.hpp"
 
 namespace mongo {
 
@@ -221,26 +220,28 @@ namespace mongo {
 
                 long long passes = 0;
                 char buf[32];
-                while ( 1 ) {
-                    OpTime op(c.getLastOp());
-                    
-                    if ( op.isNull() ) {
-                        if ( anyReplEnabled() ) {
-                            result.append( "wnote" , "no write has been done on this connection" );
-                        }
-                        else if ( e.isNumber() && e.numberInt() <= 1 ) {
-                            // don't do anything
-                            // w=1 and no repl, so this is fine
-                        }
-                        else {
-                            // w=2 and no repl
-                            result.append( "wnote" , "no replication has been enabled, so w=2+ won't work" );
-                            result.append( "err", "norepl" );
-                            return true; 
-                        }
-                        break;
+                OpTime op(c.getLastOp());
+
+                if ( op.isNull() ) {
+                    if ( anyReplEnabled() ) {
+                        result.append( "wnote" , "no write has been done on this connection" );
+                    }
+                    else if ( e.isNumber() && e.numberInt() <= 1 ) {
+                        // don't do anything
+                        // w=1 and no repl, so this is fine
+                    }
+                    else {
+                        // w=2 and no repl
+                        result.append( "wnote" , "no replication has been enabled, so w=2+ won't work" );
+                        result.append( "err", "norepl" );
+                        return true;
                     }
 
+                    result.appendNull( "err" );
+                    return true;
+                }
+
+                while ( 1 ) {
                     // check this first for w=0 or w=1
                     if ( opReplicatedEnough( op, e ) ) {
                         break;
@@ -257,6 +258,7 @@ namespace mongo {
                         result.append( "wtimeout" , true );
                         errmsg = "timed out waiting for slaves";
                         result.append( "waited" , t.millis() );
+                        result.append("replicatedTo", getHostsReplicatedTo(op));
                         result.append( "err" , "timeout" );
                         return true;
                     }
@@ -266,6 +268,8 @@ namespace mongo {
                     sleepmillis(1);
                     killCurrentOp.checkForInterrupt();
                 }
+
+                result.append("replicatedTo", getHostsReplicatedTo(op));
                 result.appendNumber( "wtime" , t.millis() );
             }
 
@@ -466,240 +470,6 @@ namespace mongo {
         }
     } cmdProfile;
 
-    void reportLockStats(BSONObjBuilder& result);
-    
-    class CmdServerStatus : public Command {
-        unsigned long long _started;
-    public:
-        virtual bool slaveOk() const {
-            return true;
-        }
-        CmdServerStatus() : Command("serverStatus", true) {
-            _started = curTimeMillis64();
-        }
-
-        virtual LockType locktype() const { return NONE; }
-
-        virtual void help( stringstream& help ) const {
-            help << "returns lots of administrative server statistics";
-        }
-
-        bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            long long start = Listener::getElapsedTimeMillis();
-            BSONObjBuilder timeBuilder(128);
-
-
-            bool authed = cc().getAuthenticationInfo()->isAuthorizedReads("admin");
-
-            result.append("host", prettyHostName() );
-            result.append("version", versionString);
-            result.append("process","mongod");
-            result.append("pid", (int)getpid());
-            result.append("uptime",(double) (time(0)-cmdLine.started));
-            result.append("uptimeMillis", (long long)(curTimeMillis64()-_started));
-            result.append("uptimeEstimate",(double) (start/1000));
-            result.appendDate( "localTime" , jsTime() );
-
-            reportLockStats(result);
-
-            {
-                BSONObjBuilder t;
-                
-                t.append( "totalTime" , (long long)(1000 * ( curTimeMillis64() - _started ) ) );
-                t.append( "lockTime" , Lock::globalLockStat()->getTimeLocked( 'W' ) );
-
-                {
-                    BSONObjBuilder ttt( t.subobjStart( "currentQueue" ) );
-                    int w=0, r=0;
-                    Client::recommendedYieldMicros( &w , &r, true );
-                    ttt.append( "total" , w + r );
-                    ttt.append( "readers" , r );
-                    ttt.append( "writers" , w );
-                    ttt.done();
-                }
-
-                {
-                    BSONObjBuilder ttt( t.subobjStart( "activeClients" ) );
-                    int w=0, r=0;
-                    Client::getActiveClientCount( w , r );
-                    ttt.append( "total" , w + r );
-                    ttt.append( "readers" , r );
-                    ttt.append( "writers" , w );
-                    ttt.done();
-                }
-
-
-
-                result.append( "globalLock" , t.obj() );
-            }
-            timeBuilder.appendNumber( "after basic" , Listener::getElapsedTimeMillis() - start );
-
-            {
-                BSONObjBuilder t( result.subobjStart( "mem" ) );
-
-                t.append("bits",  ( sizeof(int*) == 4 ? 32 : 64 ) );
-
-                ProcessInfo p;
-                int v = 0;
-                if ( p.supported() ) {
-                    t.appendNumber( "resident" , p.getResidentSize() );
-                    v = p.getVirtualMemorySize();
-                    t.appendNumber( "virtual" , v );
-                    t.appendBool( "supported" , true );
-                }
-                else {
-                    result.append( "note" , "not all mem info support on this platform" );
-                    t.appendBool( "supported" , false );
-                }
-
-                timeBuilder.appendNumber( "middle of mem" , Listener::getElapsedTimeMillis() - start );
-
-                int m = (int) (MemoryMappedFile::totalMappedLength() / ( 1024 * 1024 ));
-                t.appendNumber( "mapped" , m );
-                
-                if ( cmdLine.dur ) {
-                    m *= 2;
-                    t.appendNumber( "mappedWithJournal" , m );
-                }
-
-                t.done();
-
-            }
-            timeBuilder.appendNumber( "after mem" , Listener::getElapsedTimeMillis() - start );
-
-            {
-                BSONObjBuilder bb( result.subobjStart( "connections" ) );
-                bb.append( "current" , connTicketHolder.used() );
-                bb.append( "available" , connTicketHolder.available() );
-                bb.done();
-            }
-            timeBuilder.appendNumber( "after connections" , Listener::getElapsedTimeMillis() - start );
-
-            {
-                BSONObjBuilder bb( result.subobjStart( "extra_info" ) );
-                bb.append("note", "fields vary by platform");
-                ProcessInfo p;
-                p.getExtraInfo(bb);
-                bb.done();
-                timeBuilder.appendNumber( "after extra info" , Listener::getElapsedTimeMillis() - start );
-
-            }
-
-            {
-                BSONObjBuilder bb( result.subobjStart( "indexCounters" ) );
-                globalIndexCounters.append( bb );
-                bb.done();
-            }
-
-            {
-                BSONObjBuilder bb( result.subobjStart( "backgroundFlushing" ) );
-                globalFlushCounters.append( bb );
-                bb.done();
-            }
-
-            {
-                BSONObjBuilder bb( result.subobjStart( "cursors" ) );
-                ClientCursor::appendStats( bb );
-                bb.done();
-            }
-
-            {
-                BSONObjBuilder bb( result.subobjStart( "network" ) );
-                networkCounter.append( bb );
-                bb.done();
-            }
-
-
-            timeBuilder.appendNumber( "after counters" , Listener::getElapsedTimeMillis() - start );
-
-            if ( anyReplEnabled() ) {
-                BSONObjBuilder bb( result.subobjStart( "repl" ) );
-                appendReplicationInfo( bb , authed , cmdObj["repl"].numberInt() );
-                bb.done();
-
-                if ( ! _isMaster() ) {
-                    result.append( "opcountersRepl" , replOpCounters.getObj() );
-                }
-
-                if (theReplSet) {
-                    result.append( "replNetworkQueue", replset::BackgroundSync::get()->getCounters());
-                }
-            }
-
-            timeBuilder.appendNumber( "after repl" , Listener::getElapsedTimeMillis() - start );
-
-            result.append( "opcounters" , globalOpCounters.getObj() );
-
-            {
-                BSONObjBuilder asserts( result.subobjStart( "asserts" ) );
-                asserts.append( "regular" , assertionCount.regular );
-                asserts.append( "warning" , assertionCount.warning );
-                asserts.append( "msg" , assertionCount.msg );
-                asserts.append( "user" , assertionCount.user );
-                asserts.append( "rollovers" , assertionCount.rollovers );
-                asserts.done();
-            }
-
-            timeBuilder.appendNumber( "after asserts" , Listener::getElapsedTimeMillis() - start );
-
-            result.append( "writeBacksQueued" , ! writeBackManager.queuesEmpty() );
-
-            if( cmdLine.dur ) {
-                result.append("dur", dur::stats.asObj());
-            }
-            
-            {
-                BSONObjBuilder record( result.subobjStart( "recordStats" ) );
-                Record::appendStats( record );
-
-                set<string> dbs;
-                {
-                    Lock::DBRead read( "local" );
-                    dbHolder().getAllShortNames( dbs );
-                }
-
-                for ( set<string>::iterator i = dbs.begin(); i != dbs.end(); ++i ) {
-                    string db = *i;
-                    Client::ReadContext ctx( db );
-                    BSONObjBuilder temp( record.subobjStart( db ) );
-                    ctx.ctx().db()->recordStats().record( temp );
-                    temp.done();
-                }
-
-                record.done();
-            }
-
-            timeBuilder.appendNumber( "after dur" , Listener::getElapsedTimeMillis() - start );
-
-            {
-                RamLog* rl = RamLog::get( "warnings" );
-                massert(15880, "no ram log for warnings?" , rl);
-                
-                if (rl->lastWrite() >= time(0)-(10*60)){ // only show warnings from last 10 minutes
-                    vector<const char*> lines;
-                    rl->get( lines );
-                    
-                    BSONArrayBuilder arr( result.subarrayStart( "warnings" ) );
-                    for ( unsigned i=std::max(0,(int)lines.size()-10); i<lines.size(); i++ )
-                        arr.append( lines[i] );
-                    arr.done();
-                }
-            }
-
-            if ( ! authed )
-                result.append( "note" , "run against admin for more info" );
-            
-            timeBuilder.appendNumber( "at end" , Listener::getElapsedTimeMillis() - start );
-            if ( Listener::getElapsedTimeMillis() - start > 1000 ) {
-                BSONObj t = timeBuilder.obj();
-                log() << "serverStatus was very slow: " << t << endl;
-                result.append( "timing" , t );
-            }
-
-            return true;
-        }
-    } cmdServerStatus;
-
     class CmdGetOpTime : public Command {
     public:
         virtual bool slaveOk() const {
@@ -793,6 +563,20 @@ namespace mongo {
         virtual bool adminOnly() const { return false; }
         virtual void help( stringstream& help ) const { help << "count objects in collection"; }
         virtual bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
+
+            long long skip = 0;
+            if ( cmdObj["skip"].isNumber() ) {
+                skip = cmdObj["skip"].numberLong();
+                if ( skip < 0 ) {
+                    errmsg = "skip value is negative in count query";
+                    return false;
+                }
+            }
+            else if ( cmdObj["skip"].ok() ) {
+                errmsg = "skip value is not a valid number";
+                return false;
+            }
+
             string ns = parseNs(dbname, cmdObj);
             string err;
             int errCode;
@@ -937,8 +721,10 @@ namespace mongo {
 
             for ( list<BSONObj>::iterator i=all.begin(); i!=all.end(); i++ ) {
                 BSONObj o = *i;
-                log(1) << "reIndex ns: " << toDeleteNs << " index: " << o << endl;
-                theDataFileMgr.insertWithObjMod( Namespace( toDeleteNs.c_str() ).getSisterNS( "system.indexes" ).c_str() , o , true );
+                LOG(1) << "reIndex ns: " << toDeleteNs << " index: " << o << endl;
+                string systemIndexesNs =
+                        Namespace( toDeleteNs.c_str() ).getSisterNS( "system.indexes" );
+                theDataFileMgr.insertWithObjMod( systemIndexesNs.c_str(), o, false, true );
             }
 
             result.append( "nIndexes" , (int)all.size() );
@@ -1253,7 +1039,7 @@ namespace mongo {
                 min = Helpers::modifiedRangeBound( min , idx->keyPattern() , -1 );
                 max = Helpers::modifiedRangeBound( max , idx->keyPattern() , -1 );
 
-                c.reset( BtreeCursor::make( d, d->idxNo(*idx), *idx, min, max, false, 1 ) );
+                c.reset( BtreeCursor::make( d, *idx, min, max, false, 1 ) );
             }
 
             long long avgObjSize = d->stats.datasize / d->stats.nrecords;
@@ -1431,7 +1217,7 @@ namespace mongo {
                     }
                 }
                 else {
-                    errmsg = str::stream() << "unknown command: " << e.fieldName();
+                    errmsg = str::stream() << "unknown option to collMod: " << e.fieldName();
                     ok = false;
                 }
             }
@@ -1547,8 +1333,8 @@ namespace mongo {
             DiskLoc extent = nsd->firstExtent;
             for( ; excessSize > extent.ext()->length && extent != nsd->lastExtent; extent = extent.ext()->xnext ) {
                 excessSize -= extent.ext()->length;
-                log( 2 ) << "cloneCollectionAsCapped skipping extent of size " << extent.ext()->length << endl;
-                log( 6 ) << "excessSize: " << excessSize << endl;
+                LOG( 2 ) << "cloneCollectionAsCapped skipping extent of size " << extent.ext()->length << endl;
+                LOG( 6 ) << "excessSize: " << excessSize << endl;
             }
             DiskLoc startLoc = extent.ext()->firstRecord;
 
@@ -1685,7 +1471,7 @@ namespace mongo {
             {
                 Lock::DBWrite lk(ns);
                 Client::Context ctx( ns );
-                theDataFileMgr.insertWithObjMod( ns.c_str(), obj, true );
+                theDataFileMgr.insertWithObjMod( ns.c_str(), obj, false, true );
             }
             return true;
         }
@@ -1733,7 +1519,12 @@ namespace mongo {
 
                 int idNum = nsd->findIdIndex();
                 if ( idNum >= 0 ) {
-                    cursor.reset( BtreeCursor::make( nsd , idNum , nsd->idx( idNum ) , BSONObj() , BSONObj() , false , 1 ) );
+                    cursor.reset( BtreeCursor::make( nsd,
+                                                     nsd->idx( idNum ),
+                                                     BSONObj(),
+                                                     BSONObj(),
+                                                     false,
+                                                     1 ) );
                 }
                 else if ( c.find( ".system." ) != string::npos ) {
                     continue;
@@ -1862,7 +1653,7 @@ namespace mongo {
             }
         }
         catch ( SendStaleConfigException& e ){
-            log(1) << "command failed because of stale config, can retry" << causedBy( e ) << endl;
+            LOG(1) << "command failed because of stale config, can retry" << causedBy( e ) << endl;
             throw;
         }
         catch ( DBException& e ) {
@@ -1960,7 +1751,7 @@ namespace mongo {
         }
 
         if ( c->adminOnly() )
-            log( 2 ) << "command: " << cmdObj << endl;
+            LOG( 2 ) << "command: " << cmdObj << endl;
 
         if (c->maintenanceMode() && theReplSet && theReplSet->isSecondary()) {
             theReplSet->setMaintenanceMode(true);
@@ -2057,6 +1848,12 @@ namespace mongo {
             else {
                 jsobj = _cmdobj;
             }
+        }
+
+        // Treat the command the same as if it has slaveOk bit on if it has a read
+        // preference setting. This is to allow these commands to run on a secondary.
+        if (hasReadPreference(_cmdobj)) {
+            queryOptions |= QueryOption_SlaveOk;
         }
 
         Client& client = cc();

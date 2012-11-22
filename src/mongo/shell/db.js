@@ -270,7 +270,6 @@ DB.prototype.shutdownServer = function(opts) {
 */
 DB.prototype.cloneDatabase = function(from) { 
     assert( isString(from) && from.length );
-    //this.resetIndexCache();
     return this._dbCommand( { clone: from } );
 }
 
@@ -297,7 +296,6 @@ DB.prototype.cloneCollection = function(from, collection, query) {
     assert( isString(collection) && collection.length );
     collection = this._name + "." + collection;
     query = query || {};
-    //this.resetIndexCache();
     return this._dbCommand( { cloneCollection:collection, from:from, query:query } );
 }
 
@@ -394,12 +392,15 @@ DB.prototype.help = function() {
     return __magicNoPrint;
 }
 
-DB.prototype.printCollectionStats = function(){
+DB.prototype.printCollectionStats = function(scale){
+
+    /* no error checking on scale, done in stats already */
+
     var mydb = this;
     this.getCollectionNames().forEach(
         function(z){
             print( z );
-            printjson( mydb.getCollection(z).stats() );
+            printjson( mydb.getCollection(z).stats(scale) );
             print( "---" );
         }
     );
@@ -447,7 +448,7 @@ DB.prototype._getExtraInfo = function(action) {
     var res = this.getLastErrorCmd(1); 
     if (res) {
         if (res.err != undefined && res.err != null) {
-            // error occured, display it
+            // error occurred, display it
             print(res.err);
             return;
         }

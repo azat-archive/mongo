@@ -25,7 +25,7 @@
 #include <vector>
 
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/stringdata.h"
+#include "mongo/base/string_data.h"
 #include "mongo/bson/util/atomic_int.h"
 #include "mongo/bson/util/builder.h"
 
@@ -331,6 +331,14 @@ namespace mongo {
          */
         bool isPrefixOf( const BSONObj& otherObj ) const;
 
+        /**
+         * @param otherObj
+         * @return returns true if the list of field names in 'this' is a prefix
+         * of the list of field names in otherObj.  Similar to 'isPrefixOf',
+         * but ignores the field values and only looks at field names.
+         */
+        bool isFieldNamePrefixOf( const BSONObj& otherObj ) const;
+
         /** This is "shallow equality" -- ints and doubles won't match.  for a
            deep equality test use woCompare (which is slower).
         */
@@ -412,7 +420,8 @@ namespace mongo {
             opELEM_MATCH = 0x12,
             opNEAR = 0x13,
             opWITHIN = 0x14,
-            opMAX_DISTANCE=0x15
+            opMAX_DISTANCE = 0x15,
+            opINTERSECT = 0x16,
         };
 
         /** add all elements of the object to the specified vector */

@@ -82,8 +82,6 @@ namespace mongo {
 
     QueryResult* processGetMore(const char *ns, int ntoreturn, long long cursorid , CurOp& curop, int pass, bool& exhaust ) {
         exhaust = false;
-        ClientCursor::Pin p(cursorid);
-        ClientCursor *cc = p.c();
 
         int bufSize = 512 + sizeof( QueryResult ) + MaxBytesToReturnToClientAtOnce;
 
@@ -92,6 +90,14 @@ namespace mongo {
         int resultFlags = ResultFlag_AwaitCapable;
         int start = 0;
         int n = 0;
+
+        Client::ReadContext ctx(ns);
+        // call this readlocked so state can't change
+        replVerifyReadsOk();
+
+        ClientCursor::Pin p(cursorid);
+        ClientCursor *cc = p.c();
+
 
         if ( unlikely(!cc) ) {
             LOGSOME << "getMore: cursorid not found " << ns << " " << cursorid << endl;
@@ -108,6 +114,7 @@ namespace mongo {
             int queryOptions = cc->queryOptions();
             
             curop.debug().query = cc->query();
+            curop.setQuery( cc->query() );
 
             start = cc->pos();
             Cursor *c = cc->c();
@@ -207,6 +214,13 @@ namespace mongo {
         return qr;
     }
 
+    ResultDetails::ResultDetails() :
+        match(),
+        orderedMatch(),
+        loadedRecord(),
+        chunkSkip() {
+    }
+
     ExplainRecordingStrategy::ExplainRecordingStrategy
     ( const ExplainQueryInfo::AncillaryInfo &ancillaryInfo ) :
     _ancillaryInfo( ancillaryInfo ) {
@@ -233,10 +247,9 @@ namespace mongo {
     _orderedMatches() {
     }
     
-    void MatchCountingExplainStrategy::noteIterate( bool match, bool orderedMatch,
-                                                   bool loadedRecord, bool chunkSkip ) {
-        _noteIterate( match, orderedMatch, loadedRecord, chunkSkip );
-        if ( orderedMatch ) {
+    void MatchCountingExplainStrategy::noteIterate( const ResultDetails& resultDetails ) {
+        _noteIterate( resultDetails );
+        if ( resultDetails.orderedMatch ) {
             ++_orderedMatches;
         }
     }
@@ -253,9 +266,11 @@ namespace mongo {
         _explainInfo->notePlan( *_cursor, scanAndOrder, indexOnly );
     }
 
-    void SimpleCursorExplainStrategy::_noteIterate( bool match, bool orderedMatch,
-                                                   bool loadedRecord, bool chunkSkip ) {
-        _explainInfo->noteIterate( match, loadedRecord, chunkSkip, *_cursor );
+    void SimpleCursorExplainStrategy::_noteIterate( const ResultDetails& resultDetails ) {
+        _explainInfo->noteIterate( resultDetails.match,
+                                   resultDetails.loadedRecord,
+                                   resultDetails.chunkSkip,
+                                   *_cursor );
     }
 
     void SimpleCursorExplainStrategy::noteYield() {
@@ -274,11 +289,12 @@ namespace mongo {
     _cursor( cursor ) {
     }
     
-    void QueryOptimizerCursorExplainStrategy::_noteIterate( bool match, bool orderedMatch,
-                                                           bool loadedRecord, bool chunkSkip ) {
+    void QueryOptimizerCursorExplainStrategy::_noteIterate( const ResultDetails& resultDetails ) {
         // Note ordered matches only; if an unordered plan is selected, the explain result will
         // be updated with reviseN().
-        _cursor->noteIterate( orderedMatch, loadedRecord, chunkSkip );
+        _cursor->noteIterate( resultDetails.orderedMatch,
+                              resultDetails.loadedRecord,
+                              resultDetails.chunkSkip );
     }
 
     void QueryOptimizerCursorExplainStrategy::noteYield() {
@@ -303,7 +319,8 @@ namespace mongo {
         _buf.skip( sizeof( QueryResult ) );
     }
 
-    BSONObj ResponseBuildStrategy::current( bool allowCovered ) const {
+    BSONObj ResponseBuildStrategy::current( bool allowCovered,
+                                            ResultDetails* resultDetails ) const {
         if ( _parsedQuery.returnKey() ) {
             BSONObjBuilder bob;
             bob.appendKeys( _cursor->indexKeyPattern(), _cursor->currKey() );
@@ -315,6 +332,7 @@ namespace mongo {
                 return keyFieldsOnly->hydrate( _cursor->currKey() );
             }
         }
+        resultDetails->loadedRecord = true;
         BSONObj ret = _cursor->current();
         verify( ret.isValid() );
         return ret;
@@ -328,23 +346,26 @@ namespace mongo {
     _bufferedMatches() {
     }
     
-    bool OrderedBuildStrategy::handleMatch( bool &orderedMatch, MatchDetails& details ) {
+    bool OrderedBuildStrategy::handleMatch( ResultDetails* resultDetails ) {
         DiskLoc loc = _cursor->currLoc();
         if ( _cursor->getsetdup( loc ) ) {
-            return orderedMatch = false;
+            return false;
         }
         if ( _skip > 0 ) {
             --_skip;
-            return orderedMatch = false;
+            return false;
         }
+        BSONObj currentDocument = current( true, resultDetails );
         // Explain does not obey soft limits, so matches should not be buffered.
         if ( !_parsedQuery.isExplain() ) {
             fillQueryResultFromObj( _buf, _parsedQuery.getFields(),
-                                    current( true ), &details,
+                                    currentDocument, &resultDetails->matchDetails,
                                    ( _parsedQuery.showDiskLoc() ? &loc : 0 ) );
             ++_bufferedMatches;
         }
-        return orderedMatch = true;
+        resultDetails->match = true;
+        resultDetails->orderedMatch = true;
+        return true;
     }
 
     ReorderBuildStrategy* ReorderBuildStrategy::make( const ParsedQuery& parsedQuery,
@@ -367,18 +388,19 @@ namespace mongo {
         _scanAndOrder.reset( newScanAndOrder( queryPlan ) );
     }
 
-    bool ReorderBuildStrategy::handleMatch( bool &orderedMatch, MatchDetails& details ) {
-        orderedMatch = false;
+    bool ReorderBuildStrategy::handleMatch( ResultDetails* resultDetails ) {
         if ( _cursor->getsetdup( _cursor->currLoc() ) ) {
             return false;
         }
-        _handleMatchNoDedup();
+        _handleMatchNoDedup( resultDetails );
+        resultDetails->match = true;
         return true;
     }
     
-    void ReorderBuildStrategy::_handleMatchNoDedup() {
+    void ReorderBuildStrategy::_handleMatchNoDedup( ResultDetails* resultDetails ) {
         DiskLoc loc = _cursor->currLoc();
-        _scanAndOrder->add( current( false ), _parsedQuery.showDiskLoc() ? &loc : 0 );
+        _scanAndOrder->add( current( false, resultDetails ),
+                            _parsedQuery.showDiskLoc() ? &loc : 0 );
     }
 
     int ReorderBuildStrategy::rewriteMatches() {
@@ -429,21 +451,21 @@ namespace mongo {
                                                          QueryPlanSummary() ) );
     }
 
-    bool HybridBuildStrategy::handleMatch( bool &orderedMatch, MatchDetails& details ) {
+    bool HybridBuildStrategy::handleMatch( ResultDetails* resultDetails ) {
         if ( !_queryOptimizerCursor->currentPlanScanAndOrderRequired() ) {
-            return _orderedBuild.handleMatch( orderedMatch, details );
+            return _orderedBuild.handleMatch( resultDetails );
         }
-        orderedMatch = false;
-        return handleReorderMatch();
+        return handleReorderMatch( resultDetails );
     }
     
-    bool HybridBuildStrategy::handleReorderMatch() {
+    bool HybridBuildStrategy::handleReorderMatch( ResultDetails* resultDetails ) {
         DiskLoc loc = _cursor->currLoc();
         if ( _scanAndOrderDups.getsetdup( loc ) ) {
             return false;
         }
+        resultDetails->match = true;
         try {
-            _reorderBuild->_handleMatchNoDedup();
+            _reorderBuild->_handleMatchNoDedup( resultDetails );
         } catch ( const UserException &e ) {
             if ( e.getCode() == ScanAndOrderMemoryLimitExceededAssertionCode ) {
                 if ( _queryOptimizerCursor->hasPossiblyExcludedPlans() ) {
@@ -504,22 +526,19 @@ namespace mongo {
     }
 
     bool QueryResponseBuilder::addMatch() {
-        MatchDetails details;
+        ResultDetails resultDetails;
 
         if ( _parsedQuery.getFields() && _parsedQuery.getFields()->getArrayOpType() == Projection::ARRAY_OP_POSITIONAL ) {
             // field projection specified, and contains an array operator
-            details.requestElemMatchKey();
+            resultDetails.matchDetails.requestElemMatchKey();
         }
 
-        if ( !currentMatches( details ) ) {
-            return false;
-        }
-        if ( !chunkMatches() ) {
-            return false;
-        }
-        bool orderedMatch = false;
-        bool match = _builder->handleMatch( orderedMatch, details );
-        _explain->noteIterate( match, orderedMatch, true, false );
+        bool match =
+                currentMatches( &resultDetails ) &&
+                chunkMatches( &resultDetails ) &&
+                _builder->handleMatch( &resultDetails );
+
+        _explain->noteIterate( resultDetails );
         return match;
     }
 
@@ -615,23 +634,24 @@ namespace mongo {
         ( HybridBuildStrategy::make( _parsedQuery, _queryOptimizerCursor, _buf ) );
     }
 
-    bool QueryResponseBuilder::currentMatches( MatchDetails& details ) {
-        if ( _cursor->currentMatches( &details ) ) {
-            return true;
+    bool QueryResponseBuilder::currentMatches( ResultDetails* resultDetails ) {
+        bool matches = _cursor->currentMatches( &resultDetails->matchDetails );
+        if ( resultDetails->matchDetails.hasLoadedRecord() ) {
+            resultDetails->loadedRecord = true;
         }
-        _explain->noteIterate( false, false, details.hasLoadedRecord(), false );
-        return false;
+        return matches;
     }
 
-    bool QueryResponseBuilder::chunkMatches() {
+    bool QueryResponseBuilder::chunkMatches( ResultDetails* resultDetails ) {
         if ( !_chunkManager ) {
             return true;
         }
         // TODO: should make this covered at some point
+        resultDetails->loadedRecord = true;
         if ( _chunkManager->belongsToMe( _cursor->current() ) ) {
             return true;
         }
-        _explain->noteIterate( false, false, true, true );
+        resultDetails->chunkSkip = true;
         return false;
     }
     
@@ -658,8 +678,13 @@ namespace mongo {
         }
         else {
             cursor =
-                NamespaceDetailsTransient::getCursor( ns.c_str(), query, order, QueryPlanSelectionPolicy::any(),
-                                                      0, pq_shared, false, &queryPlan );
+                NamespaceDetailsTransient::getCursor( ns.c_str(),
+                                                      query,
+                                                      order,
+                                                      QueryPlanSelectionPolicy::any(),
+                                                      pq_shared,
+                                                      false,
+                                                      &queryPlan );
         }
         verify( cursor );
         
@@ -913,13 +938,13 @@ namespace mongo {
         // Run a command.
         
         if ( pq.couldBeCommand() ) {
+            curop.markCommand();
             BufBuilder bb;
             bb.skip(sizeof(QueryResult));
             BSONObjBuilder cmdResBuf;
             if ( runCommands(ns, jsobj, curop, bb, cmdResBuf, false, queryOptions) ) {
                 curop.debug().iscommand = true;
                 curop.debug().query = jsobj;
-                curop.markCommand();
 
                 auto_ptr< QueryResult > qr;
                 qr.reset( (QueryResult *) bb.buf() );

@@ -33,6 +33,7 @@
 #include "mongo/db/namespace-inl.h"
 #include "mongo/db/namespace_details-inl.h"
 #include "mongo/db/namespacestring.h"
+#include "mongo/platform/cstdint.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mmap.h"
 
@@ -48,7 +49,7 @@ namespace mongo {
     class Cursor;
     class OpDebug;
 
-    void dropDatabase(string db);
+    void dropDatabase(const std::string& db);
     bool repairDatabase(string db, string &errmsg, bool preserveClonedFilesOnFailure = false, bool backupOriginalFiles = false);
 
     /* low level - only drops this ns */
@@ -100,8 +101,7 @@ namespace mongo {
 
         Extent* getExtent(DiskLoc loc) const;
         Extent* _getExtent(DiskLoc loc) const;
-        Record* recordAt(DiskLoc dl);
-        Record* makeRecord(DiskLoc dl, int size);
+        Record* recordAt(DiskLoc dl) const;
         void grow(DiskLoc dl, int size);
 
         char* p() const { return (char *) _mb; }
@@ -132,16 +132,37 @@ namespace mongo {
         // The object o may be updated if modified on insert.
         void insertAndLog( const char *ns, const BSONObj &o, bool god = false, bool fromMigrate = false );
 
-        /** insert will add an _id to the object if not present.  if you would like to see the final object
-            after such an addition, use this method.
-            @param o both and in and out param 
-            */
-        DiskLoc insertWithObjMod(const char *ns, BSONObj & /*out*/o, bool god = false);
+        /**
+         * insert() will add an _id to the object if not present.  If you would like to see the
+         * final object after such an addition, use this method.
+         * @param o both and in and out param
+         * @param mayInterrupt When true, killop may interrupt the function call.
+         */
+        DiskLoc insertWithObjMod(const char* ns,
+                                 BSONObj& /*out*/o,
+                                 bool mayInterrupt = false,
+                                 bool god = false);
 
         /** @param obj in value only for this version. */
         void insertNoReturnVal(const char *ns, BSONObj o, bool god = false);
 
-        DiskLoc insert(const char *ns, const void *buf, int len, bool god = false, bool mayAddIndex = true, bool *addedID = 0);
+        /**
+         * Insert the contents of @param buf with length @param len into namespace @param ns.
+         * @param mayInterrupt When true, killop may interrupt the function call.
+         * @param god if true, you may pass in obuf of NULL and then populate the returned DiskLoc
+         *     after the call -- that will prevent a double buffer copy in some cases (btree.cpp).
+         * @param mayAddIndex almost always true, except for invocation from rename namespace
+         *     command.
+         * @param addedID if not null, set to true if adding _id element.  You must assure false
+         *     before calling if using.
+         */
+        DiskLoc insert(const char* ns,
+                       const void* buf,
+                       int32_t len,
+                       bool mayInterrupt = false,
+                       bool god = false,
+                       bool mayAddIndex = true,
+                       bool* addedID = 0);
         static shared_ptr<Cursor> findAll(const char *ns, const DiskLoc &startLoc = DiskLoc());
 
         /* special version of insert for transaction logging -- streamlined a bit.
@@ -152,9 +173,11 @@ namespace mongo {
 
         static Extent* getExtent(const DiskLoc& dl);
         static Record* getRecord(const DiskLoc& dl);
-        static DeletedRecord* makeDeletedRecord(const DiskLoc& dl, int len);
+        static DeletedRecord* getDeletedRecord(const DiskLoc& dl);
 
         void deleteRecord(const char *ns, Record *todelete, const DiskLoc& dl, bool cappedOK = false, bool noWarn = false, bool logOp=false);
+
+        void deleteRecord(NamespaceDetails* d, const char *ns, Record *todelete, const DiskLoc& dl, bool cappedOK = false, bool noWarn = false, bool logOp=false);
 
         /* does not clean up indexes, etc. : just deletes the record in the pdfile. use deleteRecord() to unindex */
         void _deleteRecord(NamespaceDetails *d, const char *ns, Record *todelete, const DiskLoc& dl);
@@ -284,6 +307,8 @@ namespace mongo {
          * and how many times we throw a PageFaultException
          */
         static void appendStats( BSONObjBuilder& b );
+
+        static void appendWorkingSetInfo( BSONObjBuilder& b );
     private:
         
         int _netLength() const { return _lengthWithHeaders - HeaderSize; }
@@ -314,6 +339,7 @@ namespace mongo {
     */
     class Extent {
     public:
+        enum { extentSignature = 0x41424344 };
         unsigned magic;
         DiskLoc myLoc;
         DiskLoc xnext, xprev; /* next/prev extent for this namespace */
@@ -330,10 +356,7 @@ namespace mongo {
 
         static int HeaderSize() { return sizeof(Extent)-4; }
 
-        bool validates() {
-            return !(firstRecord.isNull() ^ lastRecord.isNull()) &&
-                   length >= 0 && !myLoc.isNull();
-        }
+        bool validates(const DiskLoc diskLoc, BSONArrayBuilder* errors = NULL);
 
         BSONObj dump() {
             return BSON( "loc" << myLoc.toString() << "xnext" << xnext.toString() << "xprev" << xprev.toString()
@@ -356,7 +379,7 @@ namespace mongo {
         /* like init(), but for a reuse case */
         DiskLoc reuse(const char *nsname, bool newUseIsAsCapped);
 
-        bool isOk() const { return magic == 0x41424344; }
+        bool isOk() const { return magic == extentSignature; }
         void assertOk() const { verify(isOk()); }
 
         Record* newRecord(int len);
@@ -490,16 +513,12 @@ namespace mongo {
 
 namespace mongo {
 
-    inline Record* MongoDataFile::recordAt(DiskLoc dl) {
+    inline Record* MongoDataFile::recordAt(DiskLoc dl) const {
         int ofs = dl.getOfs();
-        if( ofs < DataFileHeader::HeaderSize ) badOfs(ofs); // will uassert - external call to keep out of the normal code path
-        return (Record*) (p()+ofs);
-    }
-
-    inline Record* MongoDataFile::makeRecord(DiskLoc dl, int size) {
-        int ofs = dl.getOfs();
-        if( ofs < DataFileHeader::HeaderSize ) badOfs(ofs); // will uassert - external call to keep out of the normal code path
-        return (Record*) (p()+ofs);
+        if (ofs < DataFileHeader::HeaderSize) {
+            badOfs(ofs); // will uassert - external call to keep out of the normal code path
+        }
+        return reinterpret_cast<Record*>(p() + ofs);
     }
 
     inline DiskLoc Record::getNext(const DiskLoc& myLoc) {
@@ -597,22 +616,25 @@ namespace mongo {
     }
 
     inline Record* DataFileMgr::getRecord(const DiskLoc& dl) {
-        verify( dl.a() != -1 );
-        Record* r = cc().database()->getFile(dl.a())->recordAt(dl);
-        return r;
+        verify(dl.a() != -1);
+        return cc().database()->getFile(dl.a())->recordAt(dl);
     }
 
     BOOST_STATIC_ASSERT( 16 == sizeof(DeletedRecord) );
 
-    inline DeletedRecord* DataFileMgr::makeDeletedRecord(const DiskLoc& dl, int len) {
-        verify( dl.a() != -1 );
-        return (DeletedRecord*) cc().database()->getFile(dl.a())->makeRecord(dl, sizeof(DeletedRecord));
+    inline DeletedRecord* DataFileMgr::getDeletedRecord(const DiskLoc& dl) {
+        return reinterpret_cast<DeletedRecord*>(getRecord(dl));
     }
-
-    void ensureHaveIdIndex(const char *ns);
 
     inline BSONObj BSONObj::make(const Record* r ) {
         return BSONObj( r->data() );
     }
-    
+
+    DiskLoc allocateSpaceForANewRecord(const char* ns,
+                                       NamespaceDetails* d,
+                                       int32_t lenWHdr,
+                                       bool god);
+
+    void addRecordToRecListInExtent(Record* r, DiskLoc loc);
+
 } // namespace mongo

@@ -16,12 +16,12 @@
  */
 
 
-#include "pch.h"
-#include "cursors.h"
-#include "../client/connpool.h"
-#include "../db/commands.h"
-#include "../util/concurrency/task.h"
-#include "../util/net/listen.h"
+#include "mongo/pch.h"
+#include "mongo/s/cursors.h"
+#include "mongo/client/connpool.h"
+#include "mongo/db/commands.h"
+#include "mongo/util/concurrency/task.h"
+#include "mongo/util/net/listen.h"
 
 namespace mongo {
     const int ShardedClientCursor::INIT_REPLY_BUFFER_SIZE = 32768;
@@ -143,8 +143,15 @@ namespace mongo {
 
     long long CursorCache::TIMEOUT = 600000;
 
+    unsigned getCCRandomSeed() {
+        scoped_ptr<SecureRandom> sr( SecureRandom::create() );
+        return sr->nextInt64();
+    }
+
     CursorCache::CursorCache()
-        :_mutex( "CursorCache" ), _shardedTotal(0) {
+        :_mutex( "CursorCache" ),
+         _random( getCCRandomSeed() ),
+         _shardedTotal(0) {
     }
 
     CursorCache::~CursorCache() {
@@ -207,13 +214,17 @@ namespace mongo {
 
     long long CursorCache::genId() {
         while ( true ) {
-            long long x = Security::getNonce();
+            scoped_lock lk( _mutex );
+
+            long long x = Listener::getElapsedTimeMillis() << 32;
+            x |= _random.nextInt32();
+
             if ( x == 0 )
                 continue;
+
             if ( x < 0 )
                 x *= -1;
 
-            scoped_lock lk( _mutex );
             MapSharded::iterator i = _cursors.find( x );
             if ( i != _cursors.end() )
                 continue;
@@ -232,7 +243,7 @@ namespace mongo {
         int n = *x++;
 
         if ( n > 2000 ) {
-            log( n < 30000 ? LL_WARNING : LL_ERROR ) << "receivedKillCursors, n=" << n << endl;
+            LOG( n < 30000 ? LL_WARNING : LL_ERROR ) << "receivedKillCursors, n=" << n << endl;
         }
 
 
@@ -245,7 +256,7 @@ namespace mongo {
             LOG(_myLogLevel) << "CursorCache::gotKillCursors id: " << id << endl;
 
             if ( ! id ) {
-                log( LL_WARNING ) << " got cursor id of 0 to kill" << endl;
+                LOG( LL_WARNING ) << " got cursor id of 0 to kill" << endl;
                 continue;
             }
 
@@ -261,7 +272,7 @@ namespace mongo {
 
                 MapNormal::iterator j = _refs.find( id );
                 if ( j == _refs.end() ) {
-                    log( LL_WARNING ) << "can't find cursor: " << id << endl;
+                    LOG( LL_WARNING ) << "can't find cursor: " << id << endl;
                     continue;
                 }
                 server = j->second;
@@ -295,7 +306,7 @@ namespace mongo {
             if ( idleFor < TIMEOUT ) {
                 continue;
             }
-            log() << "killing old cursor " << i->second->getId() << " idle for: " << idleFor << "ms" << endl; // TODO: make log(1)
+            log() << "killing old cursor " << i->second->getId() << " idle for: " << idleFor << "ms" << endl; // TODO: make LOG(1)
             _cursors.erase( i );
             i = _cursors.begin(); // possible 2nd entry will get skipped, will get on next pass
             if ( i == _cursors.end() )

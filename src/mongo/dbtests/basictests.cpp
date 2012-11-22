@@ -267,7 +267,7 @@ namespace BasicTests {
 
             int maxSleepTimeMillis = 1000;
             int lastSleepTimeMillis = -1;
-            int epsMillis = 50; // Allowable inprecision for timing
+            int epsMillis = 100; // Allowable inprecision for timing
 
             Backoff backoff( maxSleepTimeMillis, maxSleepTimeMillis * 2 );
 
@@ -496,20 +496,6 @@ namespace BasicTests {
             assertCmp( 1, "1", "01", true );
             assertCmp( -1, "1", "11", true );
             assertCmp( 1, "2", "11", true );
-        }
-    };
-
-    class DatabaseValidNames {
-    public:
-        void run() {
-            ASSERT( NamespaceString::validDBName( "foo" ) );
-            ASSERT( ! NamespaceString::validDBName( "foo/bar" ) );
-            ASSERT( ! NamespaceString::validDBName( "foo bar" ) );
-            ASSERT( ! NamespaceString::validDBName( "foo.bar" ) );
-
-            ASSERT( NamespaceString::normal( "asdads" ) );
-            ASSERT( ! NamespaceString::normal( "asda$ds" ) );
-            ASSERT( NamespaceString::normal( "local.oplog.$main" ) );
         }
     };
 
@@ -796,7 +782,6 @@ namespace BasicTests {
             add< LexNumCmp >();
             add< LexNumCmpLexOnly >();
 
-            add< DatabaseValidNames >();
             add< DatabaseOwnsNS >();
 
             add< NSValidNames >();

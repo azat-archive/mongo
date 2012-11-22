@@ -43,13 +43,14 @@ var setupConf = function(){
 };
 
 var replConf = setupConf();
-jsTest.log( 'New rs config: ' + tojson( primaryNode.getDB( 'local' ).system.replset.findOne() ));
 
 var conn = st.s;
 
 // Wait until the ReplicaSetMonitor refreshes its view and see the tags
 ReplSetTest.awaitRSClientHosts( conn, primaryNode,
         { ok: true, tags: PRI_TAG }, replTest.name );
+
+jsTest.log( 'New rs config: ' + tojson( primaryNode.getDB( 'local' ).system.replset.findOne() ));
 
 jsTest.log( 'connpool: ' + tojson(conn.getDB('admin').runCommand({ connPoolStats: 1 })));
 
@@ -112,12 +113,14 @@ assert.eq( primaryNode.name, explain.server );
 assert.eq( 1, explain.n );
 
 // Kill all members except one
+var stoppedNodes = [];
 for ( var x = 0; x < NODES - 1; x++ ){
     replTest.stop( x );
+    stoppedNodes.push( replTest.nodes[x] );
 }
 
 // Wait for ReplicaSetMonitor to realize nodes are down
-ReplSetTest.awaitRSClientHosts( conn, replTest.nodes[0], { ok: false }, replTest.name );
+ReplSetTest.awaitRSClientHosts( conn, stoppedNodes, { ok: false }, replTest.name );
 
 // Wait for the last node to be in steady state -> secondary (not recovering)
 var lastNode = replTest.nodes[NODES - 1];

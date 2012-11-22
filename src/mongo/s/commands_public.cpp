@@ -494,6 +494,19 @@ namespace mongo {
                     BSONObjBuilder& result,
                     bool ){
 
+                long long skip = 0;
+                if( cmdObj["skip"].isNumber() ){
+                    skip = cmdObj["skip"].numberLong();
+                    if( skip < 0 ){
+                        errmsg = "skip value is negative in count query";
+                        return false;
+                    }
+                }
+                else if( cmdObj["skip"].ok() ){
+                    errmsg = "skip value is not a valid number";
+                    return false;
+                }
+
                 const string collection = cmdObj.firstElement().valuestrsafe();
                 const string fullns = dbName + "." + collection;
 
@@ -514,8 +527,6 @@ namespace mongo {
                      * apply it only once we have collected all counts.
                      */
                     if( limit != 0 && cmdObj["skip"].isNumber() ){
-                        long long skip = cmdObj["skip"].numberLong();
-                        uassert( 16260 , "skip has to be positive" , skip >= 0 );
                         if ( limit > 0 )
                             limit += skip;
                         else
@@ -523,6 +534,10 @@ namespace mongo {
                     }
 
                     countCmdBuilder.append( "limit", limit );
+                }
+
+                if (cmdObj.hasField("$queryOptions")) {
+                    countCmdBuilder.append(cmdObj["$queryOptions"]);
                 }
 
                 map<Shard, BSONObj> countResult;
@@ -706,7 +721,7 @@ namespace mongo {
                 BSONObj filter = cmdObj.getObjectField("query");
                 uassert(13343,  "query for sharded findAndModify must have shardkey", cm->hasShardKey(filter));
 
-                ChunkPtr chunk = cm->findChunk(filter);
+                ChunkPtr chunk = cm->findChunkForDoc(filter);
                 ShardConnection conn( chunk->getShard() , fullns );
                 BSONObj res;
                 bool ok = conn->runCommand( conf->getName() , cmdObj , res );
@@ -1107,14 +1122,15 @@ namespace mongo {
                 while ( i.more() ) {
                     BSONElement e = i.next();
                     string fn = e.fieldName();
-                    if ( fn == "map" ||
+                    if (fn == "map" ||
                             fn == "mapreduce" ||
                             fn == "mapparams" ||
                             fn == "reduce" ||
                             fn == "query" ||
                             fn == "sort" ||
                             fn == "scope" ||
-                            fn == "verbose" ) {
+                            fn == "verbose" ||
+                            fn == "$queryOptions") {
                         b.append( e );
                     }
                     else if ( fn == "out" ||
@@ -1140,7 +1156,7 @@ namespace mongo {
             ChunkPtr insertSharded( ChunkManagerPtr manager, const char* ns, BSONObj& o, int flags, bool safe ) {
                 // note here, the MR output process requires no splitting / migration during process, hence StaleConfigException should not happen
                 Strategy* s = SHARDED;
-                ChunkPtr c = manager->findChunk( o );
+                ChunkPtr c = manager->findChunkForDoc( o );
                 LOG(4) << "  server:" << c->getShard().toString() << " " << o << endl;
                 s->insert( c->getShard() , ns , o , flags, safe);
                 return c;
@@ -1379,7 +1395,22 @@ namespace mongo {
                         // points will be properly sorted using the set
                         for ( set<BSONObj>::iterator it = splitPts.begin() ; it != splitPts.end() ; ++it )
                             sortedSplitPts.push_back( *it );
-                        confOut->shardCollection( finalColLong, sortKey, true, &sortedSplitPts );
+
+                        // pre-split the collection onto all the shards for this database.
+                        // Note that it's not completely safe to pre-split onto non-primary shards
+                        // using the shardcollection method (a conflict may result if multiple
+                        // map-reduces are writing to the same output collection, for instance).
+                        // TODO: pre-split mapReduce output in a safer way.
+                        set<Shard> shardSet;
+                        confOut->getAllShards( shardSet );
+                        vector<Shard> outShards( shardSet.begin() , shardSet.end() );
+
+                        confOut->shardCollection( finalColLong ,
+                                                  sortKey ,
+                                                  true ,
+                                                  &sortedSplitPts ,
+                                                  &outShards );
+
                     }
 
                     map<BSONObj, int> chunkSizes;
@@ -1451,7 +1482,7 @@ namespace mongo {
                         verify( size < 0x7fffffff );
 
                         // key reported should be the chunk's minimum
-                        ChunkPtr c =  cm->findChunk(key);
+                        ChunkPtr c =  cm->findIntersectingChunk(key);
                         if ( !c ) {
                             warning() << "Mongod reported " << size << " bytes inserted for key " << key << " but can't find chunk" << endl;
                         } else {
@@ -1591,6 +1622,11 @@ namespace mongo {
             /* create the command for the shards */
             BSONObjBuilder commandBuilder;
             pShardPipeline->toBson(&commandBuilder);
+
+            if (cmdObj.hasField("$queryOptions")) {
+                commandBuilder.append(cmdObj["$queryOptions"]);
+            }
+
             BSONObj shardedCommand(commandBuilder.done());
 
             BSONObjBuilder shardQueryBuilder;

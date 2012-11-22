@@ -1,6 +1,7 @@
 // mr.h
 
 /**
+ *    Copyright (C) 2012 10gen Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -72,7 +73,7 @@ namespace mongo {
             /**
              * @param type (map|reduce|finalize)
              */
-            JSFunction( string type , const BSONElement& e );
+            JSFunction( const std::string& type , const BSONElement& e );
             virtual ~JSFunction() {}
 
             virtual void init( State * state );

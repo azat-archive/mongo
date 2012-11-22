@@ -16,9 +16,9 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "mongo/db/btree.h"
 #include "mongo/db/hasher.h"
 #include "mongo/db/index.h"
+#include "mongo/db/keypattern.h"
 #include "mongo/db/matcher.h"
 #include "mongo/db/namespace-inl.h"
 #include "mongo/db/pdfile.h"
@@ -110,7 +110,7 @@ namespace mongo {
 
     private:
         string _hashedField;
-        BSONObj _keyPattern;
+        KeyPattern _keyPattern;
         HashSeed _seed; //defaults to zero if not in the IndexSpec
         HashVersion _hashVersion; //defaults to zero if not in the IndexSpec
         bool _isSparse;

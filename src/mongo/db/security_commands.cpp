@@ -1,4 +1,3 @@
-// security_commands.cpp
 /*
  *    Copyright (C) 2010 10gen Inc.
  *
@@ -15,20 +14,19 @@
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-// security.cpp links with both dbgrid and db.  this file db only -- at least for now.
+#include "mongo/pch.h"
 
-// security.cpp
-
-#include "pch.h"
-#include "security.h"
-#include "../util/md5.hpp"
-#include "json.h"
-#include "pdfile.h"
-#include "db.h"
-#include "dbhelpers.h"
-#include "commands.h"
-#include "jsobj.h"
-#include "client.h"
+#include "mongo/db/auth/authentication_session.h"
+#include "mongo/db/auth/mongo_authentication_session.h"
+#include "mongo/db/client_common.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/db.h"
+#include "mongo/db/dbhelpers.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/db/json.h"
+#include "mongo/db/pdfile.h"
+#include "mongo/platform/random.h"
+#include "mongo/util/md5.hpp"
 
 namespace mongo {
 
@@ -44,10 +42,12 @@ namespace mongo {
        where <key> is md5(<nonce_str><username><pwd_digest_str>) as a string
     */
 
-    boost::thread_specific_ptr<nonce64> lastNonce;
-
     class CmdGetNonce : public Command {
     public:
+        CmdGetNonce() : Command("getnonce") {
+            _random = SecureRandom::create();
+        }
+        
         virtual bool requiresAuth() { return false; }
         virtual bool logTheOp() { return false; }
         virtual bool slaveOk() const {
@@ -55,15 +55,17 @@ namespace mongo {
         }
         void help(stringstream& h) const { h << "internal"; }
         virtual LockType locktype() const { return NONE; }
-        CmdGetNonce() : Command("getnonce") {}
         bool run(const string&, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            nonce64 *n = new nonce64(Security::getNonce());
+            nonce64 n = _random->nextInt64();
             stringstream ss;
-            ss << hex << *n;
+            ss << hex << n;
             result.append("nonce", ss.str() );
-            lastNonce.reset(n);
+            ClientBasic::getCurrent()->resetAuthenticationSession(
+                    new MongoAuthenticationSession(n));
             return true;
         }
+
+        SecureRandom* _random;
     } cmdGetNonce;
 
     CmdLogout cmdLogout;
@@ -88,16 +90,21 @@ namespace mongo {
 
         {
             bool reject = false;
-            nonce64 *ln = lastNonce.release();
-            if ( ln == 0 ) {
+            ClientBasic *client = ClientBasic::getCurrent();
+            AuthenticationSession *session = client->getAuthenticationSession();
+            if (!session || session->getType() != AuthenticationSession::SESSION_TYPE_MONGO) {
                 reject = true;
-                log(1) << "auth: no lastNonce" << endl;
+                LOG(1) << "auth: No pending nonce" << endl;
             }
             else {
-                digestBuilder << hex << *ln;
+                nonce64 nonce = static_cast<MongoAuthenticationSession*>(session)->getNonce();
+                digestBuilder << hex << nonce;
                 reject = digestBuilder.str() != received_nonce;
-                if ( reject ) log(1) << "auth: different lastNonce" << endl;
+                if ( reject ) {
+                    LOG(1) << "auth: Authentication failed for " << dbname << '$' << user << endl;
+                }
             }
+            client->resetAuthenticationSession(NULL);
 
             if ( reject ) {
                 log() << "auth: bad nonce received or getnonce not called. could be a driver bug or a security attack. db:" << dbname << endl;

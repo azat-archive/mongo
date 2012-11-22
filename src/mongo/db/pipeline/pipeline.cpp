@@ -67,7 +67,7 @@ namespace mongo {
          DocumentSourceLimit::createFromBson},
         {DocumentSourceMatch::matchName,
          DocumentSourceMatch::createFromBson},
-#ifdef LATER /* https://jira.mongodb.org/browse/SERVER-3253 */
+#ifdef LATER // https://jira.mongodb.org/browse/SERVER-3253 
         {DocumentSourceOut::outName,
          DocumentSourceOut::createFromBson},
 #endif
@@ -136,6 +136,11 @@ namespace mongo {
                 continue;
             }
 
+            // Ignore $queryOptions (like read preference)
+            if (strcmp(pFieldName, "$queryOptions") == 0) {
+                continue;
+            }
+
             /* we didn't recognize a field in the command */
             ostringstream sb;
             sb <<
@@ -162,35 +167,26 @@ namespace mongo {
                     pipeElement.type() == Object);
             BSONObj bsonObj(pipeElement.Obj());
 
-            intrusive_ptr<DocumentSource> pSource;
+            // Parse a pipeline stage from 'bsonObj'.
+            uassert(16435, "A pipeline stage specification object must contain exactly one field.",
+                    bsonObj.nFields() == 1);
+            BSONElement stageSpec = bsonObj.firstElement();
+            const char* stageName = stageSpec.fieldName();
 
-            /* use the object to add a DocumentSource to the processing chain */
-            BSONObjIterator bsonIterator(bsonObj);
-            while(bsonIterator.more()) {
-                BSONElement bsonElement(bsonIterator.next());
-                const char *pFieldName = bsonElement.fieldName();
-
-                /* select the appropriate operation and instantiate */
-                StageDesc key;
-                key.pName = pFieldName;
-                const StageDesc *pDesc = (const StageDesc *)
+            // Create a DocumentSource pipeline stage from 'stageSpec'.
+            StageDesc key;
+            key.pName = stageName;
+            const StageDesc* pDesc = (const StageDesc*)
                     bsearch(&key, stageDesc, nStageDesc, sizeof(StageDesc),
                             stageDescCmp);
-                if (pDesc) {
-                    pSource = (*pDesc->pFactory)(&bsonElement, pCtx);
-                    pSource->setPipelineStep(iStep);
-                }
-                else {
-                    ostringstream sb;
-                    sb <<
-                       "Pipeline::run(): unrecognized pipeline op \"" <<
-                       pFieldName;
-                    errmsg = sb.str();
-                    return intrusive_ptr<Pipeline>();
-                }
-            }
 
-            pSourceVector->push_back(pSource);
+            uassert(16436,
+                    str::stream() << "Unrecognized pipeline stage name: '" << stageName << "'",
+                    pDesc);
+            intrusive_ptr<DocumentSource> stage = (*pDesc->pFactory)(&stageSpec, pCtx);
+            verify(stage);
+            stage->setPipelineStep(iStep);
+            pSourceVector->push_back(stage);
         }
 
         /* if there aren't any pipeline stages, there's nothing more to do */
@@ -227,6 +223,35 @@ namespace mongo {
             }
         }
 
+        /* Move limits in front of skips. This is more optimal for sharding
+         * since currently, we can only split the pipeline at a single source
+         * and it is better to limit the results coming from each shard
+         */
+        for(int i = pSourceVector->size() - 1; i >= 1 /* not looking at 0 */; i--) {
+            DocumentSourceLimit* limit =
+                dynamic_cast<DocumentSourceLimit*>((*pSourceVector)[i].get());
+            DocumentSourceSkip* skip =
+                dynamic_cast<DocumentSourceSkip*>((*pSourceVector)[i-1].get());
+            if (limit && skip) {
+                // Increase limit by skip since the skipped docs now pass through the $limit
+                limit->setLimit(limit->getLimit() + skip->getSkip());
+                swap((*pSourceVector)[i], (*pSourceVector)[i-1]);
+
+                // Start at back again. This is needed to handle cases with more than 1 $limit
+                // (S means skip, L means limit)
+                //
+                // These two would work without second pass (assuming back to front ordering)
+                // SL   -> LS
+                // SSL  -> LSS
+                //
+                // The following cases need a second pass to handle the second limit
+                // SLL  -> LLS
+                // SSLL -> LLSS
+                // SLSL -> LLSS
+                i = pSourceVector->size(); // decremented before next pass
+            }
+        }
+
         /*
           Coalesce adjacent filters where possible.  Two adjacent filters
           are equivalent to one filter whose predicate is the conjunction of
@@ -258,10 +283,7 @@ namespace mongo {
             */
             intrusive_ptr<DocumentSource> &pLastSource = pSourceVector->back();
             intrusive_ptr<DocumentSource> &pTemp = tempVector.at(tempi);
-            if (!pTemp || !pLastSource) {
-                errmsg = "Pipeline received empty document as argument";
-                return intrusive_ptr<Pipeline>();
-            }
+            verify(pTemp && pLastSource);
             if (!pLastSource->coalesce(pTemp))
                 pSourceVector->push_back(pTemp);
         }
@@ -399,7 +421,7 @@ namespace mongo {
             // cant use subArrayStart() due to error handling
             BSONArrayBuilder resultArray;
             for(bool hasDoc = !pSource->eof(); hasDoc; hasDoc = pSource->advance()) {
-                intrusive_ptr<Document> pDocument(pSource->getCurrent());
+                Document pDocument(pSource->getCurrent());
 
                 /* add the document to the result set */
                 BSONObjBuilder documentBuilder (resultArray.subobjStart());
@@ -450,7 +472,7 @@ namespace mongo {
           For now, this should be a BSON source array.
           In future, we might have a more clever way of getting this, when
           we have more interleaved fetching between shards.  The DocumentSource
-          interface will have to change to accomodate that.
+          interface will have to change to accommodate that.
          */
         DocumentSourceBsonArray *pSourceBsonArray =
             dynamic_cast<DocumentSourceBsonArray *>(pInputSource.get());
@@ -459,8 +481,7 @@ namespace mongo {
         BSONArrayBuilder shardOpArray; // where we'll put the pipeline ops
         for(bool hasDocument = !pSourceBsonArray->eof(); hasDocument;
             hasDocument = pSourceBsonArray->advance()) {
-            intrusive_ptr<Document> pDocument(
-                pSourceBsonArray->getCurrent());
+            Document pDocument = pSourceBsonArray->getCurrent();
             BSONObjBuilder opBuilder;
             pDocument->toBson(&opBuilder);
             shardOpArray.append(opBuilder.obj());

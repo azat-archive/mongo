@@ -17,6 +17,7 @@
  */
 
 #include "pch.h"
+
 #include "server.h"
 #include "../util/scopeguard.h"
 #include "../db/commands.h"
@@ -33,10 +34,13 @@
 #include "cursors.h"
 #include "grid.h"
 #include "s/writeback_listener.h"
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/auth_external_state_impl.h"
+#include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-    ClientInfo::ClientInfo() {
+    ClientInfo::ClientInfo(AbstractMessagingPort* messagingPort) : ClientBasic(messagingPort) {
         _cur = &_a;
         _prev = &_b;
         _autoSplitOk = true;
@@ -70,16 +74,63 @@ namespace mongo {
         _cur = _prev;
         _prev = temp;
         _cur->clear();
+        _ai.startRequest();
     }
 
-    ClientInfo * ClientInfo::get() {
+    void ClientInfo::_setupAuth() {
+        std::string adminNs = "admin";
+        DBConfigPtr config = grid.getDBConfig(adminNs);
+        Shard shard = config->getShard(adminNs);
+        scoped_ptr<ScopedDbConnection> connPtr(
+                ScopedDbConnection::getInternalScopedDbConnection(shard.getConnString(), 30.0));
+        ScopedDbConnection& conn = *connPtr;
+
+        //
+        // Note: The connection mechanism here is *not* ideal, and should not be used elsewhere.
+        // It is safe in this particular case because the admin database is always on the config
+        // server and does not move.
+        //
+
+        AuthorizationManager* authManager = new AuthorizationManager(new AuthExternalStateImpl());
+        Status status = authManager->initialize(conn.get());
+        massert(16479,
+                mongoutils::str::stream() << "Error initializing AuthorizationManager: "
+                                          << status.reason(),
+                status == Status::OK());
+        setAuthorizationManager(authManager);
+    }
+
+    ClientInfo* ClientInfo::create(AbstractMessagingPort* messagingPort) {
         ClientInfo * info = _tlInfo.get();
-        if ( ! info ) {
-            info = new ClientInfo();
-            _tlInfo.reset( info );
-            info->newRequest();
-        }
+        massert(16472, "A ClientInfo already exists for this thread", !info);
+        info = new ClientInfo(messagingPort);
+        _tlInfo.reset( info );
+        info->_setupAuth();
+        info->newRequest();
         return info;
+    }
+
+    ClientInfo * ClientInfo::get(AbstractMessagingPort* messagingPort) {
+        ClientInfo * info = _tlInfo.get();
+        if (!info) {
+            info = create(messagingPort);
+        }
+        massert(16483,
+                mongoutils::str::stream() << "AbstractMessagingPort was provided to ClientInfo::get"
+                        << " but differs from the one stored in the current ClientInfo object. "
+                        << "Current ClientInfo messaging port "
+                        << (info->port() ? "is not" : "is")
+                        << " NULL",
+                messagingPort == NULL || messagingPort == info->port());
+        return info;
+    }
+
+    bool ClientInfo::exists() {
+        return _tlInfo.get();
+    }
+
+    bool ClientBasic::hasCurrent() {
+        return ClientInfo::exists();
     }
 
     ClientBasic* ClientBasic::getCurrent() {

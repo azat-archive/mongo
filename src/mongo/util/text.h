@@ -1,21 +1,7 @@
 // text.h
+
 /*
  *    Copyright 2010 10gen Inc.
- *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
- */
-
-/*    Copyright 2009 10gen Inc.
  *
  *    Licensed under the Apache License, Version 2.0 (the "License");
  *    you may not use this file except in compliance with the License.
@@ -58,7 +44,7 @@ namespace mongo {
         
         static std::vector<std::string> split( const std::string& big , const std::string& splitter );
 
-        static std::string join( std::vector<std::string>& l , const std::string& split );
+        static std::string join( const std::vector<std::string>& l , const std::string& split );
 
     private:
         const char * _big;
@@ -70,7 +56,7 @@ namespace mongo {
      * guarantee that the codepoints are valid.
      */
     bool isValidUTF8(const char *s);
-    bool isValidUTF8(std::string s);
+    bool isValidUTF8(const std::string& s);
 
     // expect that n contains a base ten number and nothing else after it
     // NOTE win version hasn't been tested directly

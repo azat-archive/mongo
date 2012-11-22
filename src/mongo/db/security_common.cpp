@@ -28,7 +28,6 @@
 #include "security.h"
 #include "security_common.h"
 #include "commands.h"
-#include "nonce.h"
 #include "../util/md5.hpp"
 #include "client_common.h"
 #include "mongo/client/dbclientinterface.h"
@@ -107,7 +106,7 @@ namespace mongo {
             return false;
         }
 
-        log(1) << "security key: " << str << endl;
+        LOG(1) << "security key: " << str << endl;
 
         // createPWDigest should really not be a member func
         DBClientConnection conn;
