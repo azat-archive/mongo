@@ -24,7 +24,7 @@ build-stamp: configure-stamp
 	dh_testdir
 
         # Add here commands to compile the package.
-	scons 
+	scons
         #docbook-to-man debian/mongodb.sgml > mongodb.1
 	ls debian/*.1 > debian/mongodb.manpages
 
