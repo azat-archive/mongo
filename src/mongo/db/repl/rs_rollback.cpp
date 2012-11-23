@@ -329,7 +329,9 @@ namespace mongo {
                     n++;
                     bo good= them->findOne(d.ns, d._id.wrap(), NULL, QueryOption_SlaveOk).getOwned();
                     totSize += good.objsize();
-                    uassert( 13410, "replSet too much data to roll back", totSize < 300 * 1024 * 1024 );
+                    if ((n % 100000) == 0) {
+                        sethbmsg(str::stream() << "rollback n " << n);
+                    }
 
                     // note good might be eoo, indicating we should delete it
                     goodVersions.push_back(pair<DocID,bo>(d,good));

@@ -238,6 +238,12 @@ public:
             return;
         }
 
+        // print to stdout
+        if (use_db && _db == "-") {
+            processFile( root );
+            return;
+        }
+
         string ns;
         if (use_db) {
             ns += _db;
@@ -335,6 +341,11 @@ public:
     }
 
     virtual void gotObject( const BSONObj& obj ) {
+        if (_db == "-") {
+            cout << obj.jsonString(Strict, true) << endl;
+            return;
+        }
+
         if (_curns == OPLOG_SENTINEL) { // intentional ptr compare
             if (obj["op"].valuestr()[0] == 'n') // skip no-ops
                 return;
