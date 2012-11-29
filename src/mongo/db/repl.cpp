@@ -29,7 +29,13 @@
 #include "pch.h"
 
 #include <boost/thread/thread.hpp>
+#include <string>
+#include <vector>
 
+#include "mongo/db/auth/action_set.h"
+#include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/privilege.h"
 #include "jsobj.h"
 #include "../util/goodies.h"
 #include "repl.h"
@@ -49,6 +55,7 @@
 #include "pcrecpp.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/instance.h"
+#include "mongo/db/server_parameters.h"
 #include "mongo/db/queryutil.h"
 
 namespace mongo {
@@ -94,6 +101,13 @@ namespace mongo {
         virtual bool logTheOp() { return false; }
         virtual bool lockGlobally() const { return true; }
         virtual LockType locktype() const { return WRITE; }
+        virtual void addRequiredPrivileges(const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {
+            ActionSet actions;
+            actions.addAction(ActionType::resync);
+            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+        }
         void help(stringstream&h) const { h << "resync (from scratch) an out of date replica slave.\nhttp://dochub.mongodb.org/core/masterslave"; }
         CmdResync() : Command("resync") { }
         virtual bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
@@ -257,6 +271,9 @@ namespace mongo {
             help << "{ isMaster : 1 }";
         }
         virtual LockType locktype() const { return NONE; }
+        virtual void addRequiredPrivileges(const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {} // No auth required
         CmdIsMaster() : Command("isMaster", true, "ismaster") { }
         virtual bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool /*fromRepl*/) {
             /* currently request to arbiter is (somewhat arbitrarily) an ismaster request that is not
@@ -802,7 +819,49 @@ namespace mongo {
         }
     }
 
-    extern unsigned replApplyBatchSize;
+    class ReplApplyBatchSize : public ServerParameter {
+    public:
+        ReplApplyBatchSize()
+            : ServerParameter( ServerParameterSet::getGlobal(), "replApplyBatchSize" ),
+              _value( 1 ) {
+        }
+
+        int get() const { return _value; }
+
+        virtual void append( BSONObjBuilder& b ) {
+            b.append( name(), _value );
+        }
+
+        virtual Status set( const BSONElement& newValuElement ) {
+            return set( newValuElement.numberInt() );
+        }
+
+        virtual Status set( int b ) {
+            if( b < 1 || b > 1024 ) {
+                return Status( ErrorCodes::BadValue,
+                               "replApplyBatchSize has to be >= 1 and < 1024" );
+            }
+
+            if ( replSettings.slavedelay != 0 && b > 1 ) {
+                return Status( ErrorCodes::BadValue,
+                               "can't use a batch size > 1 with slavedelay" );
+            }
+            if ( ! replSettings.slave ) {
+                return Status( ErrorCodes::BadValue,
+                               "can't set replApplyBatchSize on a non-slave machine" );
+            }
+
+            _value = b;
+            return Status::OK();
+        }
+
+        virtual Status setFromString( const string& str ) {
+            return set( atoi( str.c_str() ) );
+        }
+
+        int _value;
+
+    } replApplyBatchSize;
 
     /* slave: pull some data from the master's oplog
        note: not yet in db mutex at this point.
@@ -848,10 +907,10 @@ namespace mongo {
                 save();
             }
 
-            BSONObjBuilder q;
-            q.appendDate("$gte", syncedTo.asDate());
+            BSONObjBuilder gte;
+            gte.appendTimestamp("$gte", syncedTo.asDate());
             BSONObjBuilder query;
-            query.append("ts", q.done());
+            query.append("ts", gte.done());
             if ( !only.empty() ) {
                 // note we may here skip a LOT of data table scanning, a lot of work for the master.
                 // maybe append "\\." here?
@@ -1007,7 +1066,7 @@ namespace mongo {
 
                 BSONObj op = oplogReader.next();
 
-                unsigned b = replApplyBatchSize;
+                int b = replApplyBatchSize.get();
                 bool justOne = b == 1;
                 scoped_ptr<Lock::GlobalWrite> lk( justOne ? 0 : new Lock::GlobalWrite() );
                 while( 1 ) {
@@ -1085,8 +1144,7 @@ namespace mongo {
         else {
             BSONObj user;
             {
-                Lock::GlobalWrite lk;
-                Client::Context ctxt("local.");
+                Client::ReadContext ctxt("local.");
                 if( !Helpers::findOne("local.system.users", userReplQuery, user) ||
                         // try the first user in local
                         !Helpers::getSingleton("local.system.users", user) ) {
@@ -1541,30 +1599,6 @@ namespace mongo {
         tp.join();
     }
 
-    class ReplApplyBatchSizeValidator : public ParameterValidator {
-    public:
-        ReplApplyBatchSizeValidator() : ParameterValidator( "replApplyBatchSize" ) {}
-
-        virtual bool isValid( BSONElement e , string& errmsg ) const {
-            int b = e.numberInt();
-            if( b < 1 || b > 1024 ) {
-                errmsg = "replApplyBatchSize has to be >= 1 and < 1024";
-                return false;
-            }
-
-            if ( replSettings.slavedelay != 0 && b > 1 ) {
-                errmsg = "can't use a batch size > 1 with slavedelay";
-                return false;
-            }
-            if ( ! replSettings.slave ) {
-                errmsg = "can't set replApplyBatchSize on a non-slave machine";
-                return false;
-            }
-
-            return true;
-        }
-    } replApplyBatchSizeValidator;
-    
     /** we allow queries to SimpleSlave's */
     void replVerifyReadsOk(const ParsedQuery* pq) {
         if( replSet ) {

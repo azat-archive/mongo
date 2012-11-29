@@ -43,6 +43,12 @@ namespace mongo {
         // This is a no-op for the mock
         virtual Status initialize(DBClientBase* adminDBConnection) { return Status::OK(); }
 
+        virtual Status getPrivilegeDocument(const string& dbname,
+                                            const string& user,
+                                            BSONObj* result) {
+            return Status(ErrorCodes::InternalError, "Not Implemented!");
+        }
+
     private:
         bool _returnValue;
     };

@@ -542,7 +542,7 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
     <ClInclude Include="..\db\auth\authentication_session.h" />
     <ClInclude Include="..\db\auth\authorization_manager.h" />
     <ClInclude Include="..\db\auth\auth_external_state.h" />
-    <ClInclude Include="..\db\auth\auth_external_state_impl.h" />
+    <ClInclude Include="..\db\auth\auth_external_state_d.h" />
     <ClInclude Include="..\db\auth\mongo_authentication_session.h" />
     <ClInclude Include="..\db\auth\principal.h" />
     <ClInclude Include="..\db\auth\principal_set.h" />
@@ -609,6 +609,8 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
     <ClInclude Include="..\..\third_party\pcre-8.30\pcrecpp.h" />
     <ClInclude Include="..\db\prefetch.h" />
     <ClInclude Include="..\db\repl\bgsync.h" />
+    <ClInclude Include="..\db\server_parameters.h" />
+    <ClInclude Include="..\db\server_parameters_inline.h" />
     <ClInclude Include="..\platform\atomic_intrinsics.h" />
     <ClInclude Include="..\platform\atomic_intrinsics_win32.h" />
     <ClInclude Include="..\platform\atomic_word.h" />
@@ -630,12 +632,14 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
     <ClInclude Include="..\server.h" />
     <ClInclude Include="..\s\chunk.h" />
     <ClInclude Include="..\s\cluster_constants.h" />
+    <ClInclude Include="..\s\collection_manager.h" />
     <ClInclude Include="..\s\config.h" />
     <ClInclude Include="..\s\d_chunk_manager.h" />
     <ClInclude Include="..\s\d_logic.h" />
     <ClInclude Include="..\s\d_writeback.h" />
     <ClInclude Include="..\s\field_parser.h" />
     <ClInclude Include="..\s\grid.h" />
+    <ClInclude Include="..\s\metadata_loader.h" />
     <ClInclude Include="..\s\shard.h" />
     <ClInclude Include="..\s\shardkey.h" />
     <ClInclude Include="..\s\type_chunk.h" />
@@ -1380,6 +1384,8 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
     <ClCompile Include="..\db\auth\action_type.cpp" />
     <ClCompile Include="..\db\auth\authorization_manager.cpp" />
     <ClCompile Include="..\db\auth\auth_external_state.cpp" />
+    <ClCompile Include="..\db\auth\auth_external_state_d.cpp" />
+    <ClCompile Include="..\db\auth\auth_external_state_server_common.cpp" />
     <ClCompile Include="..\db\auth\mongo_authentication_session.cpp" />
     <ClCompile Include="..\db\auth\principal.cpp" />
     <ClCompile Include="..\db\auth\principal_set.cpp" />
@@ -1391,6 +1397,7 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
     <ClCompile Include="..\db\cap.cpp" />
     <ClCompile Include="..\db\commands\fsync.cpp" />
     <ClCompile Include="..\db\commands\isself.cpp" />
+    <ClCompile Include="..\db\commands\parameters.cpp" />
     <ClCompile Include="..\db\commands\server_status.cpp" />
     <ClCompile Include="..\db\compact.cpp" />
     <ClCompile Include="..\db\curop.cpp" />
@@ -1445,10 +1452,12 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
     <ClCompile Include="..\db\restapi.cpp" />
     <ClCompile Include="..\db\scanandorder.cpp" />
     <ClCompile Include="..\db\security_common.cpp" />
+    <ClCompile Include="..\db\server_parameters.cpp" />
     <ClCompile Include="..\platform\random.cpp" />
     <ClCompile Include="..\scripting\bson_template_evaluator.cpp" />
     <ClCompile Include="..\scripting\sm_db.cpp" />
     <ClCompile Include="..\s\cluster_constants.cpp" />
+    <ClCompile Include="..\s\collection_manager.cpp" />
     <ClCompile Include="..\s\default_version.cpp" />
     <ClCompile Include="..\..\third_party\pcre-8.30\pcrecpp.cc" />
     <ClCompile Include="..\..\third_party\pcre-8.30\pcre_chartables.c" />
@@ -1509,6 +1518,7 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
     <ClCompile Include="..\s\d_writeback.cpp" />
     <ClCompile Include="..\s\field_parser.cpp" />
     <ClCompile Include="..\s\grid.cpp" />
+    <ClCompile Include="..\s\metadata_loader.cpp" />
     <ClCompile Include="..\s\shard.cpp" />
     <ClCompile Include="..\s\shardconnection.cpp" />
     <ClCompile Include="..\s\shardkey.cpp" />

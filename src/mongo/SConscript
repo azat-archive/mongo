@@ -3,6 +3,7 @@
 # This SConscript describes build rules for the "mongo" project.
 
 import os
+import itertools
 from buildscripts import utils
 
 Import("env")
@@ -96,9 +97,11 @@ env.CppUnitTest('descriptive_stats_test',
                 ['util/descriptive_stats_test.cpp'],
                 LIBDEPS=['foundation', 'bson']);
 
+env.StaticLibrary( 'mongohasher', [ "db/hasher.cpp" ] )
+
+
 commonFiles = [ "pch.cpp",
                 "buildinfo.cpp",
-                "db/hasher.cpp",
                 "db/lasterror.cpp",
                 "db/namespace.cpp",
                 "shell/mongo.cpp",
@@ -162,6 +165,15 @@ env.CppUnitTest("processinfo_test",
                 ["util/processinfo_test.cpp"],
                 LIBDEPS=["processinfo"])
 
+env.StaticLibrary("server_parameters",
+                  ["db/server_parameters.cpp"],
+                  LIBDEPS=["foundation","bson"])
+
+env.CppUnitTest("server_parameters_test",
+                [ "db/server_parameters_test.cpp" ],
+                LIBDEPS=["server_parameters"] )
+
+
 env.StaticLibrary("fail_point",
                   ["util/fail_point.cpp",
                    "util/fail_point_registry.cpp",
@@ -171,6 +183,7 @@ env.StaticLibrary("fail_point",
 env.StaticLibrary('mongocommon', commonFiles,
                   LIBDEPS=['bson',
                            'foundation',
+                           'mongohasher',
                            'md5',
                            'processinfo',
                            'stacktrace',
@@ -189,6 +202,7 @@ env.StaticLibrary("coredb", [
         "db/commands/hashcmd.cpp",
         "db/commands/isself.cpp",
         "db/commands/server_status.cpp",
+        "db/commands/parameters.cpp",
         "db/pipeline/pipeline.cpp",
         "db/dbcommands_generic.cpp",
         "db/dbwebserver.cpp",
@@ -231,7 +245,8 @@ env.StaticLibrary("coredb", [
         "db/stats/top.cpp",
         "s/shardconnection.cpp",
         ],
-                  LIBDEPS=['db/auth/auth', 'db/auth/serverauth'])
+                  LIBDEPS=['db/auth/serverauth',
+                           'server_parameters'])
 
 coreServerFiles = [ "db/common.cpp",
                     "util/net/miniwebserver.cpp",
@@ -404,7 +419,7 @@ env.Library( "coreshard", [ "client/distlock.cpp",
                             "s/chunk.cpp",
                             "s/shard.cpp",
                             "s/shardkey.cpp"],
-                            LIBDEPS=['s/config'] )
+                            LIBDEPS=['s/base'] )
 
 mongosLibraryFiles = [
     "s/interrupt_status_mongos.cpp",
@@ -426,7 +441,7 @@ mongosLibraryFiles = [
     "s/security.cpp",
     ]
 
-env.Library( "mongoscore" , mongosLibraryFiles )
+env.Library( "mongoscore" , mongosLibraryFiles, LIBDEPS=['db/auth/authmongos'] )
 
 env.CppUnitTest( "balancer_policy_test" , [ "s/balancer_policy_tests.cpp" ] ,
                  LIBDEPS=["mongoscore", "coreshard","mongocommon","coreserver","coredb","dbcmdline","mongodandmongos"] ,
@@ -492,6 +507,7 @@ env.CppUnitTest("geojsonparser_test", [ "db/geo/geojsonparser_test.cpp" ], LIBDE
 
 env.StaticLibrary("serveronly", serverOnlyFiles,
                   LIBDEPS=["coreshard",
+                           "db/auth/authmongod",
                            "dbcmdline",
                            "defaultversion",
                            "geojson",
@@ -520,7 +536,7 @@ env.StaticLibrary("gridfs", "client/gridfs.cpp")
 
 if has_option( 'use-cpu-profiler' ):
     coreServerFiles.append( 'db/commands/cpuprofile.cpp' )
-    env.Append( LIBS=['profiler'] )
+    env.Append(LIBS=['unwind'])
 
 env.StaticLibrary("coreserver", coreServerFiles, LIBDEPS=["mongocommon", "scripting"])
 
@@ -721,18 +737,36 @@ if installSetup.libraries:
     if has_option( "sharedclient" ):
         env.Install( "$INSTALL_DIR/$NIX_LIB_DIR",  '#${SHLIBPREFIX}mongoclient${SHLIBSUFFIX}')
 
+# Stage the top-level mongodb banners
+distsrc = env.Dir('#distsrc')
+env.Append(MODULE_BANNERS = [distsrc.File('README'),
+                             distsrc.File('THIRD-PARTY-NOTICES')])
+
+# If no module has introduced a file named LICENSE.txt, then inject the AGPL.
+if sum(itertools.imap(lambda x: x.name == "LICENSE.txt", env['MODULE_BANNERS'])) == 0:
+    env.Append(MODULE_BANNERS = [distsrc.File('GNU-AGPL-3.0')])
+
+# All module banners get staged to the top level of the tarfile, so we
+# need to fail if we are going to have a name collision.
+module_banner_filenames = set([f.name for f in env['MODULE_BANNERS']])
+if not len(module_banner_filenames) == len(env['MODULE_BANNERS']):
+    # TODO: Be nice and identify conflicts in error.
+    print "ERROR: Filename conflicts exist in module banners."
+    Exit(-1)
+
+# Build a set of directories containing module banners, and use that
+# to build a --transform option for each directory so that the files
+# are tar'ed up to the proper location.
+module_banner_dirs = set([Dir('#').rel_path(f.get_dir()) for f in env['MODULE_BANNERS']])
+module_banner_transforms = ["--transform %s=$SERVER_DIST_BASENAME" % d for d in module_banner_dirs]
+
 env.Command(
     '#/${SERVER_ARCHIVE}',
-    ['#buildscripts/make_archive.py',
-     '#distsrc/GNU-AGPL-3.0',
-     '#distsrc/README',
-     '#distsrc/THIRD-PARTY-NOTICES',
-     distBinaries],
-    '$PYTHON ${SOURCES[0]} -o $TARGET '
-    '--transform distsrc=$SERVER_DIST_BASENAME '
-    '--transform ${str(Dir(BUILD_DIR))}/mongo/stripped=$SERVER_DIST_BASENAME/bin '
-    '--transform ${str(Dir(BUILD_DIR))}/mongo=$SERVER_DIST_BASENAME/bin '
-    '${TEMPFILE(SOURCES[1:])}')
+    ['#buildscripts/make_archive.py'] + env["MODULE_BANNERS"] + distBinaries,
+    ' '.join(['$PYTHON ${SOURCES[0]} -o $TARGET'] + module_banner_transforms + [
+            '--transform ${str(Dir(BUILD_DIR))}/mongo/stripped=$SERVER_DIST_BASENAME/bin',
+            '--transform ${str(Dir(BUILD_DIR))}/mongo=$SERVER_DIST_BASENAME/bin',
+            '${TEMPFILE(SOURCES[1:])}']))
 
 #final alias
 env.Alias( "install", "$INSTALL_DIR" )
