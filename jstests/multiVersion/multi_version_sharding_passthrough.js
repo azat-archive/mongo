@@ -11,6 +11,7 @@ var testsToIgnore = [ /dbadmin/,
                       /indexh/,
                       /remove5/,
                       /rename6/,
+                      /reversecursor/,
                       /update4/,
                       /loglong/,
                       /logpath/,
@@ -24,6 +25,7 @@ var testsToIgnore = [ /dbadmin/,
                       /regex_limit/, // Not compatible with mongod before 2.3
                       /indexStatsCommand/, // New in 2.3.1
                       /storageDetailsCommand/, // New in 2.3.1
+                      /validate_user_documents/, // New in 2.3.2
                       /features2/ ]
 
 var testsThatAreBuggy = [ /apply_ops1/,
@@ -317,6 +319,7 @@ var v22Only = [ /^all3$/,
                 /^updatei$/,
                 /^updatej$/,
                 /^updatek$/,
+                /^updatel$/,
                 /^use_power_of_2$/,
                 /^useindexonobjgtlt$/,
                 /^where4$/,

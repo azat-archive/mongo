@@ -181,13 +181,22 @@ catch ( e ){
     y = e;
 }
 
-assert.eq( x , y , "assert format" )
+assert.eq( x.code , y.code , "assert format" )
+assert.eq( x.errmsg , y.errmsg , "assert format" )
+assert.eq( x.ok , y.ok , "assert format" )
 
 // isMaster and query-wrapped-command
 isMaster = db.runCommand({isMaster:1});
 assert( isMaster.ismaster );
 assert.eq( 'isdbgrid', isMaster.msg );
-assert.eq( isMaster, db.runCommand({query: {isMaster:1}}) );
-assert.eq( isMaster, db.runCommand({$query: {isMaster:1}}) );
+delete isMaster.localTime;
+
+im2 = db.runCommand({query: {isMaster:1}});
+delete im2.localTime;
+assert.eq( isMaster, im2 );
+
+im2 = db.runCommand({$query: {isMaster:1}});
+delete im2.localTime;
+assert.eq( isMaster, im2 );
 
 s.stop();

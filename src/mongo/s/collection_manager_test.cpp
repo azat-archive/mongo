@@ -19,12 +19,13 @@
 #include <vector>
 
 #include "mongo/db/jsobj.h"
+#include "mongo/dbtests/mock/mock_conn_registry.h"
 #include "mongo/dbtests/mock/mock_remote_db_server.h"
+#include "mongo/s/chunk_version.h"
 #include "mongo/s/collection_manager.h"
 #include "mongo/s/metadata_loader.h"
 #include "mongo/s/type_chunk.h"
 #include "mongo/s/type_collection.h"
-#include "mongo/s/util.h" // for ShardChunkVersion
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/net/hostandport.h"
 
@@ -43,8 +44,9 @@ namespace {
     using mongo::MetadataLoader;
     using mongo::MINKEY;
     using mongo::OID;
-    using mongo::ShardChunkVersion;
-    using mongo_test::MockRemoteDBServer;
+    using mongo::ChunkVersion;
+    using mongo::MockConnRegistry;
+    using mongo::MockRemoteDBServer;
     using std::string;
     using std::vector;
 
@@ -56,15 +58,17 @@ namespace {
     class SingleChunkFixture : public mongo::unittest::Test {
     protected:
         scoped_ptr<CollectionManager> manager;
+        scoped_ptr<MockRemoteDBServer> dummyConfig;
 
         void setUp() {
-            MockRemoteDBServer dummyConfig("$dummy_config");
-            mongo::ConnectionString::setConnectionHook(dummyConfig.getConnectionHook());
+            dummyConfig.reset(new MockRemoteDBServer("$dummy_config"));
+            mongo::ConnectionString::setConnectionHook(MockConnRegistry::get()->getConnStrHook());
+            MockConnRegistry::get()->addServer(dummyConfig.get());
 
             BSONObj collFoo =  BSON(CollectionType::ns("test.foo") <<
                                     CollectionType::keyPattern(BSON("a" << 1)) <<
                                     CollectionType::unique(false) <<
-                                    CollectionType::createdAt(1ULL) <<
+                                    CollectionType::updatedAt(1ULL) <<
                                     CollectionType::epoch(OID::gen()));
             // XXX Awaiting mock review
             //dummyConfig.setQueryReply("config.collections", BSONArray(collFoo));
@@ -84,6 +88,7 @@ namespace {
         }
 
         void tearDown() {
+            MockConnRegistry::get()->removeServer(dummyConfig->getServerAddress());
         }
     };
 
@@ -96,7 +101,7 @@ namespace {
         splitKeys.push_back(BSON("a" << 15));
 
         // Setup version to use on splitting.
-        //ShardChunkVersion nextVersion = manager->getMaxShardVersion();
+        //ChunkVersion nextVersion = manager->getMaxShardVersion();
         //nextVersion.incMinor();
 
         //string errMsg;

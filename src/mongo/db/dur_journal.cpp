@@ -160,7 +160,6 @@ namespace mongo {
 
         Journal::Journal() :
             _curLogFileMutex("JournalLfMutex") {
-            _ageOut = true;
             _written = 0;
             _nextFileNumber = 0;
             _curLogFile = 0;
@@ -329,6 +328,7 @@ namespace mongo {
             memset((void*)b.buf(), 0, BLKSZ);
 
             ProgressMeter m(len, 3/*secs*/, 10/*hits between time check (once every 6.4MB)*/);
+            m.setName("File Preallocator Progress");
 
             File f;
             f.open( p.string().c_str() , /*read-only*/false , /*direct-io*/false );
@@ -654,17 +654,6 @@ namespace mongo {
 
                 _oldJournalFiles.pop_front();
             }
-        }
-
-        /*int getAgeOutJournalFiles() {
-            mutex::try_lock lk(j._curLogFileMutex, 4000);
-            if( !lk.ok )
-                return -1;
-            return j._ageOut ? 1 : 0;
-        }*/
-        void setAgeOutJournalFiles(bool a) {
-            SimpleMutex::scoped_lock lk(j._curLogFileMutex);
-            j._ageOut = a;
         }
 
         void Journal::_rotate() {

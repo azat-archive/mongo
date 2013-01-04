@@ -127,6 +127,9 @@ DBCollection.prototype._massageObject = function( q ){
 
 
 DBCollection.prototype._validateObject = function( o ){
+    if (typeof(o) != "object")
+        throw "attempted to save a " + typeof(o) + " value.  document expected.";
+
     if ( o._ensureSpecial && o._checkModify )
         throw "can't save a DBQuery object";
 }
@@ -851,14 +854,19 @@ DBCollection.prototype.aggregate = function( ops ) {
     
     var arr = ops;
     
-    if ( ! ops.length ) {
+    if (!ops.length) {
         arr = [];
-        for ( var i=0; i<arguments.length; i++ ) {
-            arr.push( arguments[i] )
+        for (var i=0; i<arguments.length; i++) {
+            arr.push(arguments[i]);
         }
     }
-    
-    return this.runCommand( "aggregate" , { pipeline : arr } );
+
+    var res = this.runCommand("aggregate", {pipeline: arr});
+    if (!res.ok) {
+        printStackTrace();
+        throw "aggregate failed: " + tojson(res);
+    }
+    return res;
 }
 
 DBCollection.prototype.group = function( params ){

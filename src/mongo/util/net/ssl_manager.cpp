@@ -25,6 +25,8 @@
 #include "mongo/bson/util/atomic_int.h"
 #include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/net/sock.h"
+#include "mongo/util/scopeguard.h"
 
 namespace mongo {
 
@@ -101,18 +103,21 @@ namespace mongo {
     
     ////////////////////////////////////////////////////////////////
 
-    
-
-
-    SSLManager::SSLManager(bool client) {
-        _client = client;
+    SSLManager::SSLManager(const SSLParams& params) : 
+        _validateCertificates(false),
+        _forceValidation(params.forceCertificateValidation) {
         SSL_library_init();
         SSL_load_error_strings();
         ERR_load_crypto_strings();
+        // Add all digests and ciphers to OpenSSL's internal table
+        // so that encryption/decryption is backwards compatible
+        OpenSSL_add_all_algorithms();
         
-        _context = SSL_CTX_new( client ? SSLv23_client_method() : SSLv23_server_method() );
-        massert( 15864 , mongoutils::str::stream() << "can't create SSL Context: " << 
-                 ERR_error_string(ERR_get_error(), NULL) , _context );
+        _context = SSL_CTX_new(SSLv23_method());
+        massert(15864, 
+                mongoutils::str::stream() << "can't create SSL Context: " << 
+                _getSSLErrorMessage(ERR_get_error()), 
+                _context);
    
         // Activate all bug workaround options, to support buggy client SSL's.
         SSL_CTX_set_options(_context, SSL_OP_ALL);
@@ -123,22 +128,25 @@ namespace mongo {
 
         SSLThreadInfo::init();
         SSLThreadInfo::get();
+
+        if (!params.pemfile.empty()) {
+            if (!_setupPEM(params.pemfile, params.pempwd)) {
+                uasserted(16562, "ssl initialization problem"); 
+            }
+        }
+        if (!params.cafile.empty()) {
+            // Set up certificate validation with a certificate authority
+            if (!_setupCA(params.cafile)) {
+                uasserted(16563, "ssl initialization problem"); 
+            }
+        }
+        if (!params.crlfile.empty()) {
+            if (!_setupCRL(params.crlfile)) {
+                uasserted(16582, "ssl initialization problem");
+            }
+        }
     }
 
-    void SSLManager::setupPubPriv(const std::string& privateKeyFile, const std::string& publicKeyFile) {
-        massert(15865, 
-                mongoutils::str::stream() << "Can't read SSL certificate from file " 
-                << publicKeyFile << ":" <<  ERR_error_string(ERR_get_error(), NULL) ,
-                SSL_CTX_use_certificate_file(_context, publicKeyFile.c_str(), SSL_FILETYPE_PEM));
-  
-
-        massert(15866 , 
-                 mongoutils::str::stream() << "Can't read SSL private key from file " 
-                 << privateKeyFile << " : " << ERR_error_string(ERR_get_error(), NULL) ,
-                 SSL_CTX_use_PrivateKey_file(_context, privateKeyFile.c_str(), SSL_FILETYPE_PEM));
-    }
-    
-    
     int SSLManager::password_cb(char *buf,int num, int rwflag,void *userdata) {
         SSLManager* sm = static_cast<SSLManager*>(userdata);
         std::string pass = sm->_password;
@@ -146,11 +154,16 @@ namespace mongo {
         return(pass.size());
     }
 
-    bool SSLManager::setupPEM(const std::string& keyFile , const std::string& password) {
+    int SSLManager::verify_cb(int ok, X509_STORE_CTX *ctx) {
+	return 1; // always succeed; we will catch the error in our get_verify_result() call
+    }
+
+    bool SSLManager::_setupPEM(const std::string& keyFile , const std::string& password) {
         _password = password;
         
         if ( SSL_CTX_use_certificate_chain_file( _context , keyFile.c_str() ) != 1 ) {
-            log() << "Can't read certificate file: " << keyFile << endl;
+            error() << "cannot read certificate file: " << keyFile << ' ' <<
+                _getSSLErrorMessage(ERR_get_error()) << endl;
             return false;
         }
         
@@ -158,22 +171,162 @@ namespace mongo {
         SSL_CTX_set_default_passwd_cb( _context, &SSLManager::password_cb );
         
         if ( SSL_CTX_use_PrivateKey_file( _context , keyFile.c_str() , SSL_FILETYPE_PEM ) != 1 ) {
-            log() << "Can't read key file: " << keyFile << endl;
+            error() << "cannot read key file: " << keyFile << ' ' <<
+                _getSSLErrorMessage(ERR_get_error()) << endl;
             return false;
         }
         
+        // Verify that the certificate and the key go together.
+        if (SSL_CTX_check_private_key(_context) != 1) {
+            error() << "SSL certificate validation: " << _getSSLErrorMessage(ERR_get_error()) 
+                    << endl;
+            return false;
+        }
         return true;
     }
+
+    bool SSLManager::_setupCA(const std::string& caFile) {
+        // Load trusted CA
+        if (SSL_CTX_load_verify_locations(_context, caFile.c_str(), NULL) != 1) {
+            error() << "cannot read certificate authority file: " << caFile << " " <<
+                _getSSLErrorMessage(ERR_get_error()) << endl;
+            return false;
+        }
+        // Set SSL to require peer (client) certificate verification
+        // if a certificate is presented
+        SSL_CTX_set_verify(_context, SSL_VERIFY_PEER, &SSLManager::verify_cb);
+        _validateCertificates = true;
+        return true;
+    }
+
+    bool SSLManager::_setupCRL(const std::string& crlFile) {
+        X509_STORE *store = SSL_CTX_get_cert_store(_context);
+        fassert(16583, store);
         
-    SSL * SSLManager::secure(int fd) {
+        X509_STORE_set_flags(store, X509_V_FLAG_CRL_CHECK);
+        X509_LOOKUP *lookup = X509_STORE_add_lookup(store, X509_LOOKUP_file());
+        fassert(16584, lookup);
+
+        int status = X509_load_crl_file(lookup, crlFile.c_str(), X509_FILETYPE_PEM);
+        if (status == 0) {
+            error() << "cannot read CRL file: " << crlFile << ' ' <<
+                _getSSLErrorMessage(ERR_get_error()) << endl;
+            return false;
+        }
+        log() << "ssl imported " << status << " revoked certificate" << 
+            ((status == 1) ? "" : "s") << " from the revocation list." << 
+            endl;
+        return true;
+    }
+                
+    SSL* SSLManager::_secure(int fd) {
         // This just ensures that SSL multithreading support is set up for this thread,
         // if it's not already.
         SSLThreadInfo::get();
 
         SSL * ssl = SSL_new(_context);
-        massert( 15861 , "can't create SSL" , ssl );
-        SSL_set_fd( ssl , fd );
+        massert(15861,
+                _getSSLErrorMessage(ERR_get_error()),
+                ssl);
+        
+        int status = SSL_set_fd( ssl , fd );
+        massert(16510,
+                _getSSLErrorMessage(ERR_get_error()), 
+                status == 1);
+
         return ssl;
     }
+
+    SSL* SSLManager::connect(int fd) {
+        SSL* ssl = _secure(fd);
+        int ret = SSL_connect(ssl);
+        if (ret != 1)
+            _handleSSLError(SSL_get_error(ssl, ret));
+        return ssl;
+    }
+
+    SSL* SSLManager::accept(int fd) {
+        SSL* ssl = _secure(fd);
+        int ret = SSL_accept(ssl);
+        if (ret != 1)
+            _handleSSLError(SSL_get_error(ssl, ret));
+        return ssl;
+    }
+
+    void SSLManager::validatePeerCertificate(const SSL* ssl) {
+        if (!_validateCertificates) return;
+
+        X509* cert = SSL_get_peer_certificate(ssl);
+
+        if (cert == NULL) { // no certificate presented by peer
+            if (_forceValidation) {
+                error() << "no SSL certificate provided by peer; connection rejected" << endl;
+                throw SocketException(SocketException::CONNECT_ERROR, "");
+            }
+            else {
+                error() << "no SSL certificate provided by peer" << endl;
+            }
+            return;
+        }
+        ON_BLOCK_EXIT(X509_free, cert);
+
+        long result = SSL_get_verify_result(ssl);
+
+        if (result != X509_V_OK) {
+            error() << "SSL peer certificate validation failed:" << 
+                X509_verify_cert_error_string(result) << endl;
+            throw SocketException(SocketException::CONNECT_ERROR, "");
+        }
+
+        // TODO: check optional cipher restriction, using cert.
+    }
+
+    std::string SSLManager::_getSSLErrorMessage(int code) {
+        // 120 from the SSL documentation for ERR_error_string
+        static const size_t msglen = 120;
+
+        char msg[msglen];
+        ERR_error_string_n(code, msg, msglen);
+        return msg;
+    }
+
+    void SSLManager::_handleSSLError(int code) {
+        switch (code) {
+        case SSL_ERROR_WANT_READ:
+        case SSL_ERROR_WANT_WRITE:
+            // should not happen because we turned on AUTO_RETRY
+            error() << "SSL error" << endl;
+            throw SocketException(SocketException::CONNECT_ERROR, "");
+            break;
+
+        case SSL_ERROR_SYSCALL:
+            if (code < 0) {
+                error() << "socket error: " << errnoWithDescription() << endl;
+                throw SocketException(SocketException::CONNECT_ERROR, "");
+            }
+            error() << "could not negotiate SSL connection: EOF detected" << endl;
+            throw SocketException(SocketException::CONNECT_ERROR, "");
+            break;
+
+        case SSL_ERROR_SSL:
+        {
+            int ret = ERR_get_error();
+            error() << _getSSLErrorMessage(ret) << endl;
+            throw SocketException(SocketException::CONNECT_ERROR, "");
+            break;
+        }
+        case SSL_ERROR_ZERO_RETURN:
+            error() << "could not negotiate SSL connection: EOF detected" << endl;
+            throw SocketException(SocketException::CONNECT_ERROR, "");
+            break;
+        
+        default:
+            error() << "unrecognized SSL error" << endl;
+            throw SocketException(SocketException::CONNECT_ERROR, "");
+            break;
+        }
+    }
 }
+
 #endif
+        

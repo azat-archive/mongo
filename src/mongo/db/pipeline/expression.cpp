@@ -194,6 +194,7 @@ namespace mongo {
         {"$add", ExpressionAdd::create, 0},
         {"$and", ExpressionAnd::create, 0},
         {"$cmp", ExpressionCompare::createCmp, OpDesc::FIXED_COUNT, 2},
+        {"$concat", ExpressionConcat::create, 0},
         {"$cond", ExpressionCond::create, OpDesc::FIXED_COUNT, 3},
         // $const handled specially in parseExpression
         {"$dayOfMonth", ExpressionDayOfMonth::create, OpDesc::FIXED_COUNT, 1},
@@ -207,6 +208,7 @@ namespace mongo {
         {"$ifNull", ExpressionIfNull::create, OpDesc::FIXED_COUNT, 2},
         {"$lt", ExpressionCompare::createLt, OpDesc::FIXED_COUNT, 2},
         {"$lte", ExpressionCompare::createLte, OpDesc::FIXED_COUNT, 2},
+        {"$millisecond", ExpressionMillisecond::create, OpDesc::FIXED_COUNT, 1},
         {"$minute", ExpressionMinute::create, OpDesc::FIXED_COUNT, 1},
         {"$mod", ExpressionMod::create, OpDesc::FIXED_COUNT, 2},
         {"$month", ExpressionMonth::create, OpDesc::FIXED_COUNT, 1},
@@ -337,23 +339,45 @@ namespace mongo {
         double doubleTotal = 0;
         long long longTotal = 0;
         BSONType totalType = NumberInt;
+        bool haveDate = false;
 
         const size_t n = vpOperand.size();
         for (size_t i = 0; i < n; ++i) {
-            Value pValue(vpOperand[i]->evaluate(pDocument));
+            Value val = vpOperand[i]->evaluate(pDocument);
 
-            BSONType valueType = pValue.getType();
-            uassert(16415, "$add does not support dates",
-                    valueType != Date);
-            uassert(16416, "$add does not support strings",
-                    valueType != String);
+            if (val.numeric()) {
+                totalType = Value::getWidestNumeric(totalType, val.getType());
 
-            totalType = Value::getWidestNumeric(totalType, pValue.getType());
-            doubleTotal += pValue.coerceToDouble();
-            longTotal += pValue.coerceToLong();
+                doubleTotal += val.coerceToDouble();
+                longTotal += val.coerceToLong();
+            }
+            else if (val.getType() == Date) {
+                uassert(16612, "only one Date allowed in an $add expression",
+                        !haveDate);
+                haveDate = true;
+
+                // We don't manipulate totalType here.
+
+                longTotal += val.getDate();
+                doubleTotal += val.getDate();
+            }
+            else if (val.nullish()) {
+                return Value(BSONNULL);
+            }
+            else {
+                // leaving explicit checks for now since these were supported in alpha releases
+                uassert(16416, "$add does not support strings",
+                        val.getType() != String);
+                uasserted(16554, "$add only supports numeric or date types");
+            }
         }
 
-        if (totalType == NumberLong) {
+        if (haveDate) {
+            if (totalType == NumberDouble)
+                longTotal = static_cast<long long>(doubleTotal);
+            return Value::createDate(longTotal);
+        }
+        else if (totalType == NumberLong) {
             return Value::createLong(longTotal);
         }
         else if (totalType == NumberDouble) {
@@ -704,6 +728,31 @@ namespace mongo {
         return cmpLookup[cmpOp].name;
     }
 
+    /* ------------------------- ExpressionConcat ----------------------------- */
+
+    ExpressionConcat::~ExpressionConcat() {
+    }
+
+    intrusive_ptr<ExpressionNary> ExpressionConcat::create() {
+        return new ExpressionConcat();
+    }
+
+    Value ExpressionConcat::evaluate(const Document& input) const {
+        const size_t n = vpOperand.size();
+
+        StringBuilder result;
+        for (size_t i = 0; i < n; ++i) {
+            Value val = vpOperand[i]->evaluate(input);
+            result << val.coerceToString();
+        }
+
+        return Value::createString(result.str());
+    }
+
+    const char *ExpressionConcat::getOpName() const {
+        return "$concat";
+    }
+
     /* ----------------------- ExpressionCond ------------------------------ */
 
     ExpressionCond::~ExpressionCond() {
@@ -932,20 +981,25 @@ namespace mongo {
 
     Value ExpressionDivide::evaluate(const Document& pDocument) const {
         checkArgCount(2);
-        Value pLeft(vpOperand[0]->evaluate(pDocument));
-        Value pRight(vpOperand[1]->evaluate(pDocument));
+        Value lhs = vpOperand[0]->evaluate(pDocument);
+        Value rhs = vpOperand[1]->evaluate(pDocument);
 
-        uassert(16373,
-                "$divide does not support dates",
-                pLeft.getType() != Date && pRight.getType() != Date);
+        if (lhs.numeric() && rhs.numeric()) {
+            double numer = lhs.coerceToDouble();
+            double denom = rhs.coerceToDouble();
+            uassert(16608, "can't $divide by zero",
+                    denom != 0);
 
-        double right = pRight.coerceToDouble();
-        if (right == 0)
-            return Value(Undefined);
-
-        double left = pLeft.coerceToDouble();
-
-        return Value::createDouble(left / right);
+            return Value::createDouble(numer / denom);
+        }
+        else if (lhs.nullish() || rhs.nullish()) {
+            return Value(BSONNULL);
+        }
+        else {
+            uassert(16373, "$divide does not support dates",
+                    lhs.getType() != Date && rhs.getType() != Date);
+            uasserted(16609, "$divide only supports numeric types");
+        }
     }
 
     const char *ExpressionDivide::getOpName() const {
@@ -1034,12 +1088,12 @@ namespace mongo {
             Document::FieldPair field (fields.next());
 
             // TODO don't make a new string here
-            const string fieldName (field.first.data(), field.first.size());
+            const string fieldName = field.first.toString();
             ExpressionMap::const_iterator exprIter = _expressions.find(fieldName);
 
             // This field is not supposed to be in the output (unless it is _id)
             if (exprIter == end) {
-                if (!_excludeId && atRoot && str::equals(field.first.data(), "_id")) {
+                if (!_excludeId && atRoot && field.first == "_id") {
                     // _id from the root doc is always included (until exclusion is supported)
                     // not updating doneFields since "_id" isn't in _expressions
                     out.addField(field.first, field.second);
@@ -1070,14 +1124,12 @@ namespace mongo {
                     continue;
 
                 /*
-                   Don't add non-existent values (note:  different from NULL);
+                   Don't add non-existent values (note:  different from NULL or Undefined);
                    this is consistent with existing selection syntax which doesn't
-                   force the appearnance of non-existent fields.
+                   force the appearance of non-existent fields.
                    */
-                // TODO make missing distinct from Undefined
-                if (pValue.getType() != Undefined)
+                if (!pValue.missing())
                     out.addField(field.first, pValue);
-
 
                 continue;
             }
@@ -1136,11 +1188,11 @@ namespace mongo {
             Value pValue(it->second->evaluate(rootDoc));
 
             /*
-              Don't add non-existent values (note:  different from NULL);
+              Don't add non-existent values (note:  different from NULL or Undefined);
               this is consistent with existing selection syntax which doesn't
               force the appearnance of non-existent fields.
             */
-            if (pValue.getType() == Undefined)
+            if (pValue.missing())
                 continue;
 
             // don't add field if nothing was found in the subobject
@@ -1266,11 +1318,6 @@ namespace mongo {
         objBuilder.done();
     }
 
-    void ExpressionObject::BuilderPathSink::path(
-        const string &path, bool include) {
-        pBuilder->append(path, include);
-    }
-
     /* --------------------- ExpressionFieldPath --------------------------- */
 
     ExpressionFieldPath::~ExpressionFieldPath() {
@@ -1297,66 +1344,47 @@ namespace mongo {
         deps.insert(fieldPath.getPath(false));
     }
 
-    Value ExpressionFieldPath::evaluatePath(size_t index,
-                                            size_t pathLength,
-                                            Document pDocument) const {
-        // return value
-        Value pValue = pDocument->getValue(fieldPath.getFieldName(index));
+    Value ExpressionFieldPath::evaluatePathArray(size_t index, const Value& input) const {
+        dassert(input.getType() == Array);
 
-        /* if the field doesn't exist, quit with an undefined value */
-        if (pValue.missing())
-            return Value(Undefined);
+        // Check for remaining path in each element of array
+        vector<Value> result;
+        const vector<Value>& array = input.getArray();
+        for (size_t i=0; i < array.size(); i++) {
+            if (array[i].getType() != Object)
+                continue;
+
+            const Value nested = evaluatePath(index, array[i].getDocument());
+            if (!nested.missing())
+                result.push_back(nested);
+        }
+
+        return Value::createArray(result);
+    }
+    Value ExpressionFieldPath::evaluatePath(size_t index, const Document& input) const {
+        // Note this function is very hot so it is important that is is well optimized.
+        // In particular, all return paths should support RVO.
 
         /* if we've hit the end of the path, stop */
-        ++index;
-        if (index >= pathLength)
-            return pValue;
+        if (index == fieldPath.getPathLength() - 1)
+            return input[fieldPath.getFieldName(index)];
 
-        /*
-          We're diving deeper.  If the value was null, return null.
-        */
-        BSONType type = pValue.getType();
-        if ((type == Undefined) || (type == jstNULL))
-            return Value(Undefined);
+        // Try to dive deeper
+        const Value val = input[fieldPath.getFieldName(index)];
+        switch (val.getType()) {
+        case Object:
+            return evaluatePath(index+1, val.getDocument());
 
-        if (type == Object) {
-            /* extract from the next level down */
-            return evaluatePath(index, pathLength, pValue.getDocument());
+        case Array:
+            return evaluatePathArray(index+1, val);
+
+        default:
+            return Value();
         }
-
-        if (type == Array) {
-            /*
-              We're going to repeat this for each member of the array,
-              building up a new array as we go.
-            */
-            vector<Value> result;
-            const vector<Value>& input = pValue.getArray();
-            for (size_t i=0; i < input.size(); i++) {
-                const Value& item = input[i];
-                BSONType iType = item.getType();
-                if ((iType == Undefined) || (iType == jstNULL)) {
-                    result.push_back(item);
-                    continue;
-                }
-
-                uassert(16014, str::stream() << 
-                        "the element '" << fieldPath.getFieldName(index) <<
-                        "' along the dotted path '" <<
-                        fieldPath.getPath(false) <<
-                        "' is not an object, and cannot be navigated",
-                        iType == Object);
-
-                result.push_back(evaluatePath(index, pathLength, item.getDocument()));
-            }
-
-            return Value::createArray(result);
-        }
-        // subdocument field does not exist, return undefined
-        return Value(Undefined);
     }
 
     Value ExpressionFieldPath::evaluate(const Document& pDocument) const {
-        return evaluatePath(0, fieldPath.getPathLength(), pDocument);
+        return evaluatePath(0, pDocument);
     }
 
     void ExpressionFieldPath::addToBsonObj(BSONObjBuilder *pBuilder,
@@ -1684,6 +1712,36 @@ namespace mongo {
         return true;
     }
 
+    /* ------------------------- ExpressionMillisecond ----------------------------- */
+
+    ExpressionMillisecond::~ExpressionMillisecond() {
+    }
+
+    intrusive_ptr<ExpressionNary> ExpressionMillisecond::create() {
+        intrusive_ptr<ExpressionMillisecond> pExpression(new ExpressionMillisecond());
+        return pExpression;
+    }
+
+    ExpressionMillisecond::ExpressionMillisecond():
+        ExpressionNary() {
+    }
+
+    void ExpressionMillisecond::addOperand(const intrusive_ptr<Expression>& pExpression) {
+        checkArgLimit(1);
+        ExpressionNary::addOperand(pExpression);
+    }
+
+    Value ExpressionMillisecond::evaluate(const Document& document) const {
+        checkArgCount(1);
+        Value date(vpOperand[0]->evaluate(document));
+        const int ms = date.coerceToDate() % 1000LL;
+        return Value::createInt( ms >= 0 ? ms : 1000 + ms );
+    }
+
+    const char *ExpressionMillisecond::getOpName() const {
+        return "$millisecond";
+    }
+
     /* ------------------------- ExpressionMinute -------------------------- */
 
     ExpressionMinute::~ExpressionMinute() {
@@ -1737,46 +1795,48 @@ namespace mongo {
 
     Value ExpressionMod::evaluate(const Document& pDocument) const {
         checkArgCount(2);
-        Value pLeft(vpOperand[0]->evaluate(pDocument));
-        Value pRight(vpOperand[1]->evaluate(pDocument));
+        Value lhs = vpOperand[0]->evaluate(pDocument);
+        Value rhs = vpOperand[1]->evaluate(pDocument);
 
-        BSONType leftType = pLeft.getType();
-        BSONType rightType = pRight.getType();
+        BSONType leftType = lhs.getType();
+        BSONType rightType = rhs.getType();
 
-        uassert(16374, "$mod does not support dates", leftType != Date && rightType != Date);
+        if (lhs.numeric() && rhs.numeric()) {
+            // ensure we aren't modding by 0
+            double right = rhs.coerceToDouble();
 
-        // pass along jstNULLs and Undefineds
-        if (leftType == jstNULL || leftType == Undefined)
-            return pLeft;
-        if (rightType == jstNULL || rightType == Undefined)
-            return pRight;
-        // ensure we aren't modding by 0
-        double right = pRight.coerceToDouble();
-        if (right == 0)
-            return Value(Undefined);
+            uassert(16610, "can't $mod by 0",
+                    right != 0);
 
-        if (leftType == NumberDouble) {
-            // left is a double, return a double
-            double left = pLeft.coerceToDouble();
-            return Value::createDouble(fmod(left, right));
+            if (leftType == NumberDouble
+                || (rightType == NumberDouble && rhs.coerceToInt() != right)) {
+                // the shell converts ints to doubles so if right is larger than int max or
+                // if right truncates to something other than itself, it is a real double.
+                // Integer-valued double case is handled below
+
+                double left = lhs.coerceToDouble();
+                return Value::createDouble(fmod(left, right));
+            }
+            else if (leftType == NumberLong || rightType == NumberLong) {
+                // if either is long, return long
+                long long left = lhs.coerceToLong();
+                long long rightLong = rhs.coerceToLong();
+                return Value::createLong(left % rightLong);
+            }
+
+            // lastly they must both be ints, return int
+            int left = lhs.coerceToInt();
+            int rightInt = rhs.coerceToInt();
+            return Value::createInt(left % rightInt);
         }
-        else if (rightType == NumberDouble && pRight.coerceToInt() != right) {
-            // the shell converts ints to doubles so if right is larger than int max or
-            // if right truncates to something other than itself, it is a real double.
-            // Integer-valued double case is handled below
-            double left = pLeft.coerceToDouble();
-            return Value::createDouble(fmod(left, right));
+        else if (lhs.nullish() || rhs.nullish()) {
+            return Value(BSONNULL);
         }
-        if (leftType == NumberLong || rightType == NumberLong) {
-            // if either is long, return long
-            long long left = pLeft.coerceToLong();
-            long long rightLong = pRight.coerceToLong();
-            return Value::createLong(left % rightLong);
+        else {
+            uassert(16374, "$mod does not support dates",
+                    leftType != Date && rightType != Date);
+            uasserted(16611, "$mod only supports numeric types");
         }
-        // lastly they must both be ints, return int
-        int left = pLeft.coerceToInt();
-        int rightInt = pRight.coerceToInt();
-        return Value::createInt(left % rightInt);
     }
 
     const char *ExpressionMod::getOpName() const {
@@ -1840,13 +1900,22 @@ namespace mongo {
 
         const size_t n = vpOperand.size();
         for(size_t i = 0; i < n; ++i) {
-            Value pValue(vpOperand[i]->evaluate(pDocument));
+            Value val = vpOperand[i]->evaluate(pDocument);
 
-            uassert(16375, "$multiply does not support dates", pValue.getType() != Date);
+            if (val.numeric()) {
+                productType = Value::getWidestNumeric(productType, val.getType());
 
-            productType = Value::getWidestNumeric(productType, pValue.getType());
-            doubleProduct *= pValue.coerceToDouble();
-            longProduct *= pValue.coerceToLong();
+                doubleProduct *= val.coerceToDouble();
+                longProduct *= val.coerceToLong();
+            }
+            else if (val.nullish()) {
+                return Value(BSONNULL);
+            }
+            else {
+                uassert(16375, "$multiply does not support dates",
+                        val.getType() != Date);
+                uasserted(16555, "$mutiply only supports numeric types");
+            }
         }
 
         if (productType == NumberDouble)
@@ -1919,10 +1988,9 @@ namespace mongo {
 
     Value ExpressionIfNull::evaluate(const Document& pDocument) const {
         checkArgCount(2);
-        Value pLeft(vpOperand[0]->evaluate(pDocument));
-        BSONType leftType = pLeft.getType();
 
-        if ((leftType != Undefined) && (leftType != jstNULL))
+        Value pLeft(vpOperand[0]->evaluate(pDocument));
+        if (!pLeft.nullish())
             return pLeft;
 
         Value pRight(vpOperand[1]->evaluate(pDocument));
@@ -2397,32 +2465,53 @@ namespace mongo {
     }
 
     Value ExpressionSubtract::evaluate(const Document& pDocument) const {
-        BSONType productType;
         checkArgCount(2);
-        Value pLeft(vpOperand[0]->evaluate(pDocument));
-        Value pRight(vpOperand[1]->evaluate(pDocument));
+        Value lhs = vpOperand[0]->evaluate(pDocument);
+        Value rhs = vpOperand[1]->evaluate(pDocument);
             
-        productType = Value::getWidestNumeric(pRight.getType(), pLeft.getType());
-        
-        uassert(16376,
-                "$subtract does not support dates",
-                pLeft.getType() != Date && pRight.getType() != Date);
+        BSONType diffType = Value::getWidestNumeric(rhs.getType(), lhs.getType());
 
-        if (productType == NumberDouble) {
-            double right = pRight.coerceToDouble();
-            double left = pLeft.coerceToDouble();
+        if (diffType == NumberDouble) {
+            double right = rhs.coerceToDouble();
+            double left = lhs.coerceToDouble();
             return Value::createDouble(left - right);
         } 
-
-        long long right = pRight.coerceToLong();
-        long long left = pLeft.coerceToLong();
-        if (productType == NumberLong)
+        else if (diffType == NumberLong) {
+            long long right = rhs.coerceToLong();
+            long long left = lhs.coerceToLong();
             return Value::createLong(left - right);
-        else if (productType == NumberInt)
+        }
+        else if (diffType == NumberInt) {
+            long long right = rhs.coerceToLong();
+            long long left = lhs.coerceToLong();
             return Value::createIntOrLong(left - right);
-        else
-            massert(16413, "$subtract resulted in a non-numeric type", false);
-        
+        }
+        else if (lhs.nullish() || rhs.nullish()) {
+            return Value(BSONNULL);
+        }
+        else if (lhs.getType() == Date) {
+            if (rhs.getType() == Date) {
+                long long timeDelta = lhs.getDate() - rhs.getDate();
+                return Value(timeDelta);
+            }
+            else if (rhs.numeric()) {
+                long long millisSinceEpoch = lhs.getDate() - rhs.coerceToLong();
+                return Value(Date_t(millisSinceEpoch));
+            }
+            else {
+                uasserted(16613, str::stream() << "cant $subtract a "
+                                               << typeName(rhs.getType())
+                                               << " from a Date");
+            }
+        }
+        else {
+            if (rhs.getType()) {
+                uasserted(16614, str::stream() << "cant $subtract a Date from a "
+                                               << typeName(rhs.getType()));
+            }
+
+            uasserted(16556, "$subtract only supports numeric or Date types");
+        }
     }
 
     const char *ExpressionSubtract::getOpName() const {

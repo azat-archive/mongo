@@ -54,7 +54,7 @@ namespace mongo {
         lastExtentSize = 0;
         nIndexes = 0;
         _isCapped = capped;
-        _maxDocsInCapped = -1; // no limit
+        _maxDocsInCapped = 0x7fffffff; // no limit (value is for pre-v2.3.2 compatability)
         _paddingFactor = 1.0;
         _systemFlags = 0;
         _userFlags = 0;
@@ -70,7 +70,7 @@ namespace mongo {
         multiKeyIndexBits = 0;
         reservedA = 0;
         extraOffset = 0;
-        indexBuildInProgress = 0;
+        indexBuildsInProgress = 0;
         memset(reserved, 0, sizeof(reserved));
     }
 
@@ -116,7 +116,7 @@ namespace mongo {
         cout << "ns         " << firstExtent.toString() << ' ' << lastExtent.toString() << " nidx:" << nIndexes << '\n';
         cout << "ns         " << stats.datasize << ' ' << stats.nrecords << ' ' << nIndexes << '\n';
         cout << "ns         " << isCapped() << ' ' << _paddingFactor << ' ' << _systemFlags << ' ' << _userFlags << ' ' << dataFileVersion << '\n';
-        cout << "ns         " << multiKeyIndexBits << ' ' << indexBuildInProgress << '\n';
+        cout << "ns         " << multiKeyIndexBits << ' ' << indexBuildsInProgress << '\n';
         cout << "ns         " << (int) reserved[0] << ' ' << (int) reserved[59];
         cout << endl;
     }
@@ -234,15 +234,15 @@ namespace mongo {
         const int bucketIdx = bucket(allocSize);
         int bucketSize = bucketSizes[bucketIdx];
         int quantizeUnit = bucketSize / 16;
-        if (allocSize % quantizeUnit == 0)
-            // size is already quantized
-            return allocSize;
         if (allocSize >= (1 << 22)) // 4mb
             // all allocatons > 4mb result in 4mb/16 quantization units, even if allocated in
             // the 8mb+ bucket.  idea is to reduce quantization overhead of large records at
             // the cost of increasing the DeletedRecord size distribution in the largest bucket
             // by factor of 4.
             quantizeUnit = (1 << 18); // 256k
+        if (allocSize % quantizeUnit == 0)
+            // size is already quantized
+            return allocSize;
         const int quantizedSpace = (allocSize | (quantizeUnit - 1)) + 1;
         fassert(16484, quantizedSpace >= allocSize);
         return quantizedSpace;
@@ -517,22 +517,41 @@ namespace mongo {
         return e;
     }
 
-    void NamespaceDetails::setIndexIsMultikey(const char *thisns, int i) {
-        dassert( i < NIndexesMax );
-        unsigned long long x = ((unsigned long long) 1) << i;
-        if( multiKeyIndexBits & x ) return;
-        *getDur().writing(&multiKeyIndexBits) |= x;
+    void NamespaceDetails::setIndexIsMultikey(const char *thisns, int i, bool multikey) {
+        massert(16577, "index number greater than NIndexesMax", i < NIndexesMax );
+
+        unsigned long long mask = 1ULL << i;
+
+        if (multikey) {
+            // Shortcut if the bit is already set correctly
+            if (multiKeyIndexBits & mask) {
+                return;
+            }
+
+            *getDur().writing(&multiKeyIndexBits) |= mask;
+        }
+        else {
+            // Shortcut if the bit is already set correctly
+            if (!(multiKeyIndexBits & mask)) {
+                return;
+            }
+
+            // Invert mask: all 1's except a 0 at the ith bit
+            mask = ~mask;
+            *getDur().writing(&multiKeyIndexBits) &= mask;
+        }
+
         NamespaceDetailsTransient::get(thisns).clearQueryCache();
     }
 
     IndexDetails& NamespaceDetails::getNextIndexDetails(const char* thisns) {
         IndexDetails *id;
         try {
-            id = &idx(nIndexes,true);
+            id = &idx(getTotalIndexCount(), true);
         }
         catch(DBException&) {
-            allocExtra(thisns, nIndexes);
-            id = &idx(nIndexes,false);
+            allocExtra(thisns, getTotalIndexCount());
+            id = &idx(getTotalIndexCount(), false);
         }
         return *id;
     }
@@ -620,7 +639,7 @@ namespace mongo {
     bool NamespaceDetails::validMaxCappedDocs( long long* max ) {
         if ( *max <= 0 ||
              *max == numeric_limits<long long>::max() ) {
-            *max = -1;
+            *max = 0x7fffffff;
             return true;
         }
 
@@ -633,7 +652,7 @@ namespace mongo {
 
     long long NamespaceDetails::maxCappedDocs() const {
         verify( isCapped() );
-        if ( _maxDocsInCapped == -1 )
+        if ( _maxDocsInCapped == 0x7fffffff )
             return numeric_limits<long long>::max();
         return _maxDocsInCapped;
     }
@@ -710,13 +729,39 @@ namespace mongo {
 
     void NamespaceDetailsTransient::computeIndexKeys() {
         _indexKeys.clear();
-        NamespaceDetails *d = nsdetails(_ns.c_str());
+        NamespaceDetails *d = nsdetails(_ns);
         if ( ! d )
             return;
         NamespaceDetails::IndexIterator i = d->ii();
         while( i.more() )
             i.next().keyPattern().getFieldNames(_indexKeys);
         _keysComputed = true;
+    }
+
+    void NamespaceDetails::updateTTLIndex( int idxNo , const BSONElement& newExpireSecs ) {
+        // Need to get the actual DiskLoc of the index to update. This is embedded in the 'info'
+        // object inside the IndexDetails.
+        IndexDetails idetails = idx( idxNo );
+        BSONElement oldExpireSecs = idetails.info.obj().getField("expireAfterSeconds");
+
+        // Important that we set the new value in-place.  We are writing directly to the
+        // object here so must be careful not to overwrite with a longer numeric type.
+        massert( 16630, "new 'expireAfterSeconds' must be a number", newExpireSecs.isNumber() );
+        BSONElementManipulator manip( oldExpireSecs );
+        switch( oldExpireSecs.type() ) {
+        case EOO:
+            massert( 16631, "index does not have an 'expireAfterSeconds' field", false );
+            break;
+        case NumberInt:
+        case NumberDouble:
+            manip.SetNumber( newExpireSecs.numberDouble() );
+            break;
+        case NumberLong:
+            manip.SetLong( newExpireSecs.numberLong() );
+            break;
+        default:
+            massert( 16632, "current 'expireAfterSeconds' is not a number", false );
+        }
     }
 
     void NamespaceDetails::setSystemFlag( int flag ) {

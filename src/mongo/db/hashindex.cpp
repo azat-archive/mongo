@@ -59,9 +59,9 @@ namespace mongo {
 
     HashedIndexType::~HashedIndexType() { }
 
-    IndexSuitability HashedIndexType::suitability( const BSONObj& query , const BSONObj& order ) const {
-        FieldRangeSet frs( "" , query , true, true );
-        if ( frs.isPointIntervalSet( _hashedField ) )
+    IndexSuitability HashedIndexType::suitability( const FieldRangeSet& queryConstraints ,
+                                                   const BSONObj& order ) const {
+        if ( queryConstraints.isPointIntervalSet( _hashedField ) )
             return HELPFUL;
         return USELESS;
     }
@@ -95,7 +95,7 @@ namespace mongo {
         const vector<FieldInterval>& intervals = frs.range( _hashedField.c_str() ).intervals();
 
         //Force a match of the query against the actual document by giving
-        //the cursor a matcher with an empty indexKeyPattern.  This insures the
+        //the cursor a matcher with an empty indexKeyPattern.  This ensures the
         //index is not used as a covered index.
         //NOTE: this forcing is necessary due to potential hash collisions
         const shared_ptr< CoveredIndexMatcher > forceDocMatcher(
@@ -110,7 +110,7 @@ namespace mongo {
         for( i = intervals.begin(); i != intervals.end(); ++i ){
             if ( ! i->equality() ){
                 const shared_ptr< BtreeCursor > exhaustiveCursor(
-                        BtreeCursor::make( nsdetails( _spec->getDetails()->parentNS().c_str()),
+                        BtreeCursor::make( nsdetails( _spec->getDetails()->parentNS()),
                                            *( _spec->getDetails() ),
                                            BSON( "" << MINKEY ) ,
                                            BSON( "" << MAXKEY ) ,
@@ -131,7 +131,7 @@ namespace mongo {
                 new FieldRangeVector( newfrs , *_spec , 1 ) );
 
         const shared_ptr< BtreeCursor > cursor(
-                BtreeCursor::make( nsdetails( _spec->getDetails()->parentNS().c_str()),
+                BtreeCursor::make( nsdetails( _spec->getDetails()->parentNS()),
                         *( _spec->getDetails() ), newVector, 0, 1 ) );
         cursor->setMatcher( forceDocMatcher );
         return cursor;

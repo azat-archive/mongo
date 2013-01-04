@@ -23,11 +23,20 @@
 
 namespace mongo {
 
-    Privilege::Privilege(const std::string& resource, ActionSet actions) :
+    Privilege::Privilege(const std::string& resource, const ActionType& action) :
+        _resource(resource) {
+
+        _actions.addAction(action);
+    }
+    Privilege::Privilege(const std::string& resource, const ActionSet& actions) :
             _resource(resource), _actions(actions) {}
 
     bool Privilege::includesAction(const ActionType& action) const {
         return _actions.contains(action);
+    }
+
+    bool Privilege::includesActions(const ActionSet& actions) const {
+        return _actions.isSupersetOf(actions);
     }
 
 } // namespace mongo

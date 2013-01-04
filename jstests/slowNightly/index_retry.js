@@ -38,7 +38,14 @@ function indexBuildInProgress() {
             // accessing the 'test' database.
             if ( op.op == 'insert' && op.ns == 'test.system.indexes' ) {
                 debug(op.opid);
-                indexBuildOpId = op.opid;
+                // SERVER-4295 Make sure the index details are there
+                // we can't assert these things, since there is a race in reporting
+                // but we won't count if they aren't
+                if ( "a_1" == op.insert.name &&
+                     1 == op.insert.key.a &&
+                     op.insert.background ) {
+                    indexBuildOpId = op.opid;
+                }
             }
         }
     );
@@ -79,7 +86,8 @@ assert.soon(
         }
         return true;
     },
-    'index builds successfully'
+    'index builds successfully',
+    60000
 );
 
 print("Index built");

@@ -33,6 +33,7 @@
 
 namespace mongo {
     void createOplog();
+    void oldRepl();
 }
 
 namespace ReplTests {
@@ -46,6 +47,9 @@ namespace ReplTests {
         Client::Context _context;
     public:
         Base() : _context( ns() ) {
+            oldRepl();
+            cmdLine._replSet = "";
+            cmdLine.oplogSize = 5 * 1024 * 1024;
             replSettings.master = true;
             createOplog();
             ensureHaveIdIndex( ns(), false );
@@ -833,6 +837,66 @@ namespace ReplTests {
             }
         };
 
+        class PushSlice : public Base {
+            void doIt() const {
+                client()->update( ns(),
+                                  BSON( "_id" << 0),
+                                  BSON( "$push" <<
+                                        BSON( "a" <<
+                                              BSON( "$each" << BSON_ARRAY(3) <<
+                                                    "$slice" << -2 ) ) ) );
+            }
+            using ReplTests::Base::check;
+            void check() const {
+                ASSERT_EQUALS( 1, count() );
+                check( fromjson( "{'_id':0, a:[2,3]}"), one( fromjson( "{'_id':0}" ) ) );
+            }
+            void reset() const {
+                deleteAll( ns() );
+                insert( BSON( "_id" << 0 << "a" << BSON_ARRAY( 1 << 2 ) ) );
+            }
+        };
+
+        class PushSliceInitiallyInexistent : public Base {
+            void doIt() const {
+                client()->update( ns(),
+                                  BSON( "_id" << 0),
+                                  BSON( "$push" <<
+                                        BSON( "a" <<
+                                              BSON( "$each" << BSON_ARRAY(1<<2) <<
+                                                    "$slice" << -2 ) ) ) );
+            }
+            using ReplTests::Base::check;
+            void check() const {
+                ASSERT_EQUALS( 1, count() );
+                check( fromjson( "{'_id':0, a:[1,2] }"), one( fromjson( "{'_id':0}" ) ) );
+            }
+            void reset() const {
+                deleteAll( ns() );
+                insert( BSON( "_id" << 0 ) );
+            }
+        };
+
+        class PushSliceToZero : public Base {
+            void doIt() const {
+                client()->update( ns(),
+                                  BSON( "_id" << 0),
+                                  BSON( "$push" <<
+                                        BSON( "a" <<
+                                              BSON( "$each" << BSON_ARRAY(3) <<
+                                                    "$slice" << 0 ) ) ) );
+            }
+            using ReplTests::Base::check;
+            void check() const {
+                ASSERT_EQUALS( 1, count() );
+                check( fromjson( "{'_id':0, a:[]}"), one( fromjson( "{'_id':0}" ) ) );
+            }
+            void reset() const {
+                deleteAll( ns() );
+                insert( BSON( "_id" << 0 ) );
+            }
+        };
+
         class PushAllUpsert : public Base {
         public:
             void doIt() const {
@@ -1563,6 +1627,9 @@ namespace ReplTests {
             add< Idempotence::EmptyPushSparseIndex >();
             add< Idempotence::PushAll >();
             add< Idempotence::PushWithDollarSigns >();
+            add< Idempotence::PushSlice >();
+            add< Idempotence::PushSliceInitiallyInexistent >();
+            add< Idempotence::PushSliceToZero >();
             add< Idempotence::PushAllUpsert >();
             add< Idempotence::EmptyPushAll >();
             add< Idempotence::Pull >();

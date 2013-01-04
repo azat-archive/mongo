@@ -54,7 +54,6 @@ namespace mongo {
     static UpdateResult _updateById(bool isOperatorUpdate,
                                     int idIdxNo,
                                     ModSet* mods,
-                                    int profile,
                                     NamespaceDetails* d,
                                     NamespaceDetailsTransient *nsdt,
                                     bool su,
@@ -146,7 +145,6 @@ namespace mongo {
                      << " upsert: " << upsert << " multi: " << multi );
 
         Client& client = cc();
-        int profile = client.database()->profile;
 
         debug.updateobj = updateobj;
 
@@ -161,9 +159,11 @@ namespace mongo {
         bool isOperatorUpdate = updateobj.firstElementFieldName()[0] == '$';
         int modsIsIndexed = false; // really the # of indexes
         if ( isOperatorUpdate ) {
-            if( d && d->indexBuildInProgress ) {
+            if( d && d->indexBuildsInProgress ) {
                 set<string> bgKeys;
-                d->inProgIdx().keyPattern().getFieldNames(bgKeys);
+                for (int i = 0; i < d->indexBuildsInProgress; i++) {
+                    d->idx(d->nIndexes+i).keyPattern().getFieldNames(bgKeys);
+                }
                 mods.reset( new ModSet(updateobj, nsdt->indexKeys(), &bgKeys, forReplication) );
             }
             else {
@@ -181,7 +181,6 @@ namespace mongo {
                 UpdateResult result = _updateById( isOperatorUpdate,
                                                    idxNo,
                                                    mods.get(),
-                                                   profile,
                                                    d,
                                                    nsdt,
                                                    su,
@@ -194,12 +193,15 @@ namespace mongo {
                 if ( result.existing || ! upsert ) {
                     return result;
                 }
-                else if ( upsert && ! isOperatorUpdate && ! logop) {
+                else if ( upsert && ! isOperatorUpdate ) {
                     // this handles repl inserts
                     checkNoMods( updateobj );
                     debug.upsert = true;
                     BSONObj no = updateobj;
                     theDataFileMgr.insertWithObjMod(ns, no, false, su);
+                    if ( logop )
+                        logOp( "i", ns, no, 0, 0, fromMigrate );
+
                     return UpdateResult( 0 , 0 , 1 , no );
                 }
             }
@@ -250,10 +252,11 @@ namespace mongo {
                             break;
                         nsdt = &NamespaceDetailsTransient::get(ns);
                         if ( mods.get() && ! mods->isIndexed() ) {
-                            // we need to re-check indexes
                             set<string> bgKeys;
-                            if ( d->indexBuildInProgress )
-                                d->inProgIdx().keyPattern().getFieldNames(bgKeys);
+                            for (int i = 0; i < d->indexBuildsInProgress; i++) {
+                                // we need to re-check indexes
+                                d->idx(d->nIndexes+i).keyPattern().getFieldNames(bgKeys);
+                            }
                             mods->updateIsIndexed( nsdt->indexKeys() , &bgKeys );
                             modsIsIndexed = mods->isIndexed();
                         }
@@ -265,10 +268,6 @@ namespace mongo {
                 debug.nscanned++;
 
                 if ( mods.get() && mods->hasDynamicArray() ) {
-                    // The Cursor must have a Matcher to record an elemMatchKey.  But currently
-                    // a modifier on a dynamic array field may be applied even if there is no
-                    // elemMatchKey, so a matcher cannot be required.
-                    //verify( c->matcher() );
                     details.requestElemMatchKey();
                 }
 
@@ -350,11 +349,17 @@ namespace mongo {
                         c->prepareToTouchEarlierIterate();
                     }
 
-                    if ( modsIsIndexed <= 0 && mss->canApplyInPlace() ) {
+                    // If we've made it this far, "ns" must contain a valid collection name, and so
+                    // is of the form "db.collection".  Therefore, the following expression must
+                    // always be valid.  "system.users" updates must never be done in place, in
+                    // order to ensure that they are validated inside DataFileMgr::updateRecord(.).
+                    bool isSystemUsersMod = (NamespaceString(ns).coll == "system.users");
+
+                    if ( modsIsIndexed <= 0 && mss->canApplyInPlace() && !isSystemUsersMod ) {
                         mss->applyModsInPlace( true );// const_cast<BSONObj&>(onDisk) );
 
                         DEBUGUPDATE( "\t\t\t doing in place update" );
-                        if ( profile && !multi )
+                        if ( !multi )
                             debug.fastmod = true;
 
                         if ( modsIsIndexed ) {

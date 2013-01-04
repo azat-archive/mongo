@@ -1,5 +1,13 @@
+// Test 2dsphere near search, called via find and geoNear.
 t = db.geo_s2near
 t.drop();
+
+// Make sure that geoNear gives us back loc
+goldenPoint = {type: "Point", coordinates: [ 31.0, 41.0]}
+t.insert({geo: goldenPoint})
+t.ensureIndex({ geo : "2dsphere" })
+resNear = db.runCommand({geoNear : t.getName(), near: [30, 40], num: 1, includeLocs: true})
+assert.eq(resNear.results[0].loc, goldenPoint)
 
 // FYI:
 // One degree of long @ 0 is 111km or so.
@@ -15,17 +23,30 @@ for (var x = -points; x < points; x += 1) {
 
 origin = { "type" : "Point", "coordinates": [ lng, lat ] }
 
-t.ensureIndex({ geo : "s2d" })
+t.ensureIndex({ geo : "2dsphere" })
 
+// Near only works when the query is a point.
+someline = { "type" : "LineString", "coordinates": [ [ 40, 5], [41, 6]]}
+somepoly = { "type" : "Polygon",
+             "coordinates" : [ [ [40,5], [40,6], [41,6], [41,5], [40,5]]]}
+assert.throws(function() { return t.find({ "geo" : { "$near" : { "$geometry" : someline } } }).count()})
+assert.throws(function() { return t.find({ "geo" : { "$near" : { "$geometry" : somepoly } } }).count()})
+assert.throws(function() { return db.runCommand({geoNear : t.getName(), near: someline }).results.length})
+assert.throws(function() { return db.runCommand({geoNear : t.getName(), near: somepoly }).results.length})
+
+// Do some basic near searches.
 res = t.find({ "geo" : { "$near" : { "$geometry" : origin, $maxDistance: 2000} } }).limit(10)
-assert.eq(res.itcount(), 10)
+resNear = db.runCommand({geoNear : t.getName(), near: [0,0], num: 10, maxDistance: 2000})
+assert.eq(res.itcount(), resNear.results.length, 10)
 
 res = t.find({ "geo" : { "$near" : { "$geometry" : origin } } }).limit(10)
-assert.eq(res.itcount(), 10)
+resNear = db.runCommand({geoNear : t.getName(), near: [0,0], num: 10})
+assert.eq(res.itcount(), resNear.results.length, 10)
 
 // Find all the points!
 res = t.find({ "geo" : { "$near" : { "$geometry" : origin } } }).limit(10000)
-assert.eq(res.itcount(), (2 * points) * (2 * points))
+resNear = db.runCommand({geoNear : t.getName(), near: [0,0], num: 10000})
+assert.eq(resNear.results.length, res.itcount(), (2 * points) * (2 * points))
 
 // longitude goes -180 to 180
 // latitude goes -90 to 90
@@ -36,4 +57,5 @@ t.insert({geo: { "type" : "Point", "coordinates" : [180, -90]}})
 t.insert({geo: { "type" : "Point", "coordinates" : [180, 90]}})
 t.insert({geo: { "type" : "Point", "coordinates" : [-180, 90]}})
 res = t.find({ "geo" : { "$near" : { "$geometry" : origin } } }).limit(10000)
-assert.eq(res.itcount(), (2 * points) * (2 * points) + 4)
+resNear = db.runCommand({geoNear : t.getName(), near: [0,0], num: 10000})
+assert.eq(res.itcount(), resNear.results.length, (2 * points) * (2 * points) + 4)

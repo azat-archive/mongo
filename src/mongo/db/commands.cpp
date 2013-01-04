@@ -31,12 +31,22 @@
 #include "mongo/db/client.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/replutil.h"
+#include "mongo/db/server_parameters.h"
 
 namespace mongo {
 
     map<string,Command*> * Command::_commandsByBestName;
     map<string,Command*> * Command::_webCommands;
     map<string,Command*> * Command::_commands;
+
+    int Command::testCommandsEnabled = 0;
+
+    namespace {
+        // TODO: This should only be settable at the command line, not at runtime. Need SERVER-7778
+        ExportedServerParameter<int> testCommandsParameter(ServerParameterSet::getGlobal(),
+                                                           "enableTestCommands",
+                                                           &Command::testCommandsEnabled);
+    }
 
     string Command::parseNsFullyQualified(const string& dbname, const BSONObj& cmdObj) const { 
         string s = cmdObj.firstElement().valuestr();
@@ -169,18 +179,17 @@ namespace mongo {
         return c->locktype();
     }
 
-    // TODO: remove this default implementation so that all Command subclasses have to explicitly
-    // declare their own.
-    void Command::addRequiredPrivileges(const std::string& dbname,
-                                        const BSONObj& cmdObj,
-                                        std::vector<Privilege>* out) {
-        if (!requiresAuth()) {
-            return;
+    void Command::appendCommandStatus(BSONObjBuilder& result, bool ok, const std::string& errmsg) {
+        BSONObj tmp = result.asTempObj();
+        bool have_ok = tmp.hasField("ok");
+        bool have_errmsg = tmp.hasField("errmsg");
+
+        if (!have_ok)
+            result.append( "ok" , ok ? 1.0 : 0.0 );
+
+        if (!ok && !have_errmsg) {
+            result.append("errmsg", errmsg);
         }
-        ActionSet actions;
-        actions.addAction(locktype() == WRITE ? ActionType::oldWrite : ActionType::oldRead);
-        Privilege privilege(adminOnly() ? "admin" : dbname, actions);
-        out->push_back(privilege);
     }
 
     void Command::logIfSlow( const Timer& timer, const string& msg ) {

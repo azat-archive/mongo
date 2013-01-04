@@ -137,12 +137,12 @@ namespace mongo {
         _index = &_d->idx(_idxNo);
 
         // If the parsing or index indicates this is a special query, don't continue the processing
-        if ( _special.size() ||
+        if (!_special.empty() ||
             ( _index->getSpec().getType() &&
-             _index->getSpec().getType()->suitability( _originalQuery, _order ) != USELESS ) ) {
+             _index->getSpec().getType()->suitability( _frs, _order ) != USELESS ) ) {
 
             _type  = _index->getSpec().getType();
-            if( !_special.size() ) _special = _index->getSpec().getType()->getPlugin()->getName();
+            if (_special.empty()) _special = _index->getSpec().getType()->getPlugin()->getName();
 
             massert( 13040 , (string)"no type for special: " + _special , _type );
             // hopefully safe to use original query in these contexts;
@@ -998,27 +998,28 @@ doneCheckOrder:
     }
     
     bool QueryPlanGenerator::addSpecialPlan( NamespaceDetails *d ) {
-        DEBUGQO( "\t special : " << _qps.frsp().getSpecial() );
-        set<string> special = _qps.frsp().getSpecial();
+        DEBUGQO( "\t special : " << _qps.frsp().getSpecial().toString() );
+        SpecialIndices special = _qps.frsp().getSpecial();
         if (!special.empty()) {
+            // Try to handle the special part of the query with an index
             NamespaceDetails::IndexIterator i = d->ii();
             while( i.more() ) {
                 int j = i.pos();
                 IndexDetails& ii = i.next();
                 const IndexSpec& spec = ii.getSpec();
-                if ((special.end() != special.find(spec.getTypeName())) && 
-                    spec.suitability( _qps.originalQuery(), _qps.order())) {
+                // TODO(hk): Make sure we can do a $near and $within query, one using
+                // the index one using the matcher.
+                if (special.has(spec.getTypeName()) &&
+                    spec.suitability( _qps.frsp().frsForIndex(d, j), _qps.order() ) != USELESS ) {
                     uassert( 16330, "'special' query operator not allowed", _allowSpecial );
                     _qps.setSinglePlan( newPlan( d, j, BSONObj(), BSONObj(), spec.getTypeName()));
                     return true;
                 }
             }
-            stringstream ss;
-            for (set<string>::const_iterator it = special.begin(); it != special.end(); ++it) {
-                ss << *it << ", ";
+            if (special.anyRequireIndex()) {
+                uassert(13038, "can't find any special indices: " + special.toString()
+                               + " for: " + _qps.originalQuery().toString(), false );
             }
-            uassert(13038, "can't find any special indices: " + ss.str()
-                           + " for: " + _qps.originalQuery().toString(), false );
         }
         return false;
     }
@@ -1303,7 +1304,7 @@ doneCheckOrder:
         return bab.arr().jsonString();
     }
     
-    MultiPlanScanner *MultiPlanScanner::make( const char *ns,
+    MultiPlanScanner *MultiPlanScanner::make( const StringData& ns,
                                              const BSONObj &query,
                                              const BSONObj &order,
                                              const shared_ptr<const ParsedQuery> &parsedQuery,
@@ -1537,12 +1538,12 @@ doneCheckOrder:
      * $nor component that would not be represented in QueryPattern.    
      */
     
-    MultiPlanScanner::MultiPlanScanner( const char *ns,
+    MultiPlanScanner::MultiPlanScanner( const StringData& ns,
                                        const BSONObj &query,
                                        const shared_ptr<const ParsedQuery> &parsedQuery,
                                        const BSONObj &hint,
                                        QueryPlanGenerator::RecordedPlanPolicy recordedPlanPolicy ) :
-        _ns( ns ),
+        _ns( ns.toString() ),
         _or( !query.getField( "$or" ).eoo() ),
         _query( query.getOwned() ),
         _parsedQuery( parsedQuery ),
@@ -1684,7 +1685,7 @@ doneCheckOrder:
     }
 
     bool MultiPlanScanner::haveUselessOr() const {
-        NamespaceDetails *nsd = nsdetails( _ns.c_str() );
+        NamespaceDetails *nsd = nsdetails( _ns );
         if ( !nsd ) {
             return true;
         }
@@ -1975,13 +1976,9 @@ doneCheckOrder:
             // No matches are possible in the index so the index may be useful.
             return true;   
         }
-        // Hashed index types can't use simplified query bounds, since they could turn equalities
-        // into ranges, e.g.{$in : [1,2] } into {$gte : 1 , $lte : 2}
-        // TODO: refactor suitability to take a FieldRangeSetPair, and get rid of this special case
-        // See SERVER-5858.
-        BSONObj query = ( d->idx( idxNo ).getSpec().getTypeName() == "hashed" ) ?
-                        frsp.originalQuery() : frsp.simplifiedQueryForIndex( d, idxNo, keyPattern );
-        return d->idx( idxNo ).getSpec().suitability( query, order ) != USELESS;
+
+        return d->idx( idxNo ).getSpec().suitability( frsp.frsForIndex( d , idxNo ) , order )
+               != USELESS;
     }
     
     void QueryUtilIndexed::clearIndexesForPatterns( const FieldRangeSetPair &frsp, const BSONObj &order ) {

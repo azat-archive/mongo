@@ -29,6 +29,7 @@ namespace mongo {
     BSONField<std::string> ShardType::host("host");
     BSONField<bool> ShardType::draining("draining");
     BSONField<long long> ShardType::maxSize("maxSize");
+    BSONField<BSONArray> ShardType::tags("tags");
 
     ShardType::ShardType() {
         clear();
@@ -38,10 +39,9 @@ namespace mongo {
     }
 
     bool ShardType::isValid(std::string* errMsg) const {
-        std::string dummy;
-        if (errMsg == NULL) {
-            errMsg = &dummy;
-        }
+
+        string dummy;
+        if (!errMsg) errMsg = &dummy;
 
         // All the mandatory fields must be present.
         if (_name.empty()) {
@@ -62,20 +62,23 @@ namespace mongo {
         if (!_host.empty()) builder.append(host(), _host);
         if (_draining) builder.append(draining(), _draining);
         if (_maxSize > 0) builder.append(maxSize(), _maxSize);
+        if (_tags.nFields()) builder.append(tags(), _tags);
         return builder.obj();
     }
 
-    void ShardType::parseBSON(BSONObj source) {
+    bool ShardType::parseBSON(BSONObj source, string* errMsg) {
         clear();
 
-        bool ok = true;
-        ok &= FieldParser::extract(source, name, "", &_name);
-        ok &= FieldParser::extract(source, host, "", &_host);
-        ok &= FieldParser::extract(source, draining, false, &_draining);
-        ok &= FieldParser::extract(source, maxSize, 0LL, &_maxSize);
-        if (! ok) {
-            clear();
-        }
+        string dummy;
+        if (!errMsg) errMsg = &dummy;
+
+        if (!FieldParser::extract(source, name, "", &_name, errMsg)) return false;
+        if (!FieldParser::extract(source, host, "", &_host, errMsg)) return false;
+        if (!FieldParser::extract(source, draining, false, &_draining, errMsg)) return false;
+        if (!FieldParser::extract(source, maxSize, 0LL, &_maxSize, errMsg)) return false;
+        if (!FieldParser::extract(source, tags, BSONArray(), &_tags, errMsg)) return false;
+
+        return true;
     }
 
     void ShardType::clear() {
@@ -83,14 +86,16 @@ namespace mongo {
         _host.clear();
         _draining = false;
         _maxSize = 0;
+        _tags = BSONArray();
     }
 
-    void ShardType::cloneTo(ShardType* other) {
+    void ShardType::cloneTo(ShardType* other) const {
         other->clear();
         other->_name = _name;
         other->_host = _host;
         other->_draining = _draining;
         other->_maxSize = _maxSize;
+        other->_tags = _tags;
     }
 
     std::string ShardType::toString() const {

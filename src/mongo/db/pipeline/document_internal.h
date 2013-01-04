@@ -55,7 +55,7 @@ namespace mongo {
         Value val;
         Position nextCollision; // Position of next field with same hashBucket
         const int nameLen; // doesn't include '\0'
-        const char name[1]; // pointer to start of name
+        const char _name[1]; // pointer to start of name (use nameSD instead)
 
         ValueElement* next() {
             return align(plusBytes(sizeof(ValueElement) + nameLen));
@@ -65,7 +65,7 @@ namespace mongo {
             return align(plusBytes(sizeof(ValueElement) + nameLen));
         }
 
-        StringData nameSD() const { return StringData(name, nameLen); }
+        StringData nameSD() const { return StringData(_name, nameLen); }
 
 
         // helpers for doing pointer arithmetic with this class
@@ -109,7 +109,8 @@ namespace mongo {
                 , _it(first)
                 , _end(end)
                 , _includeMissing(includeMissing) {
-            skipMissing();
+            if (!_includeMissing)
+                skipMissing();
         }
 
         bool atEnd() const { return _it == _end; }
@@ -120,7 +121,8 @@ namespace mongo {
 
         void advance() {
             advanceOne();
-            skipMissing();
+            if (!_includeMissing)
+                skipMissing();
         }
 
         const ValueElement* operator-> () { return _it; }
@@ -132,10 +134,8 @@ namespace mongo {
         }
 
         void skipMissing() {
-            if (!_includeMissing) {
-                while (!atEnd() && _it->val.missing()) {
-                    advanceOne();
-                }
+            while (!atEnd() && _it->val.missing()) {
+                advanceOne();
             }
         }
 
@@ -249,7 +249,7 @@ namespace mongo {
         static unsigned hashKey(StringData name) {
             // TODO consider FNV-1a once we have a better benchmark corpus
             unsigned out;
-            MurmurHash3_x86_32(name.data(), name.size(), 0, &out);
+            MurmurHash3_x86_32(name.rawData(), name.size(), 0, &out);
             return out;
         }
 

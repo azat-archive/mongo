@@ -38,8 +38,8 @@ namespace mongo {
      *
      *     // Process the response.
      *     DatabaseType db;
-     *     db.fromBSON(dbDoc);
-     *     if (! db.isValid()) {
+     *     string errMsg;
+     *     if (!db.parseBSON(dbDoc, &errMsg) || !db.isValid(&errMsg)) {
      *         // Can't use 'db'. Take action.
      *     }
      *     // use 'db'
@@ -57,10 +57,9 @@ namespace mongo {
         static const std::string ConfigNS;
 
         // Field names and types in the database collection type.
-        static BSONField<std::string> name;
-        static BSONField<std::string> primary;
-        static BSONField<bool> scattered;
-        static BSONField<bool> draining;
+        static BSONField<std::string> name;     // database's name
+        static BSONField<std::string> primary;  // primary shard for the database
+        static BSONField<bool> draining;        // is the database being removed?
 
         // This field was last used in 2.2 series (version 3).
         static BSONField<bool> DEPRECATED_partitioned;
@@ -89,9 +88,9 @@ namespace mongo {
 
         /**
          * Clears and populates the internal state using the 'source' BSON object if the
-         * latter contains valid values. Otherwise clear the internal state.
+         * latter contains valid values. Otherwise sets errMsg and returns false.
          */
-        void parseBSON(BSONObj source);
+        bool parseBSON(BSONObj source, std::string* errMsg);
 
         /**
          * Clears the internal state.
@@ -101,7 +100,7 @@ namespace mongo {
         /**
          * Copies all the fields present in 'this' to 'other'.
          */
-        void cloneTo(DatabaseType* other);
+        void cloneTo(DatabaseType* other) const;
 
         /**
          * Returns a string representation of the current internal state.
@@ -112,23 +111,19 @@ namespace mongo {
         // individual field accessors
         //
 
-        void setName(const StringData& name) { _name = std::string(name.data(), name.size()); }
+        void setName(const StringData& name) { _name = name.toString(); }
         const std::string& getName() const { return _name; }
 
-        void setPrimary(const StringData& shard) {_primary=std::string(shard.data(), shard.size());}
+        void setPrimary(const StringData& shard) { _primary = shard.toString(); }
         const std::string& getPrimary() const { return _primary; }
 
-        void setScattered(bool scattered) { _scattered = scattered; }
-        bool getScattered() { return _scattered; }
-
-        void setDrainig(bool draining) { _draining = draining; }
+        void setDraining(bool draining) { _draining = draining; }
         bool getDraining() const { return _draining; }
 
     private:
         // Convention: (M)andatory, (O)ptional, (S)pecial rule.
         string _name;     // (M) database name
         string _primary;  // (M) primary shard for the database
-        bool _scattered;  // (O) can db collections live outside the primary?
         bool _draining;   // (O) is this database about to be deleted?
     };
 

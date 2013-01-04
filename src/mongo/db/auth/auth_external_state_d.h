@@ -18,7 +18,6 @@
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
-#include "mongo/client/dbclientinterface.h"
 #include "mongo/db/auth/auth_external_state_server_common.h"
 
 namespace mongo {
@@ -33,9 +32,14 @@ namespace mongo {
         AuthExternalStateMongod();
         virtual ~AuthExternalStateMongod();
 
-        virtual Status getPrivilegeDocument(const string& dbname,
-                                            const string& principalName,
-                                            BSONObj* result);
+        virtual bool shouldIgnoreAuthChecks() const;
+
+        virtual void startRequest();
+
+    protected:
+        virtual bool _findUser(const string& usersNamespace,
+                               const BSONObj& query,
+                               BSONObj* result) const;
     };
 
 } // namespace mongo

@@ -1067,13 +1067,13 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
     <ClCompile Include="..\base\make_string_vector.cpp" />
     <ClCompile Include="..\base\parse_number.cpp" />
     <ClCompile Include="..\base\status.cpp" />
+    <ClCompile Include="..\base\string_data.cpp" />
+    <ClCompile Include="..\bson\bson_validate.cpp" />
     <ClCompile Include="..\bson\mutable\mutable_bson.cpp" />
     <ClCompile Include="..\bson\mutable\mutable_bson_builder.cpp" />
     <ClCompile Include="..\bson\mutable\mutable_bson_heap.cpp" />
     <ClCompile Include="..\bson\mutable\mutable_bson_internal.cpp" />
     <ClCompile Include="..\bson\util\bson_extract.cpp" />
-    <ClCompile Include="..\client\authentication_table_client.cpp" />
-    <ClCompile Include="..\client\authentication_table_common.cpp" />
     <ClCompile Include="..\client\connection_factory.cpp" />
     <ClCompile Include="..\db\dbmessage.cpp" />
     <ClCompile Include="..\platform\random.cpp" />
@@ -1081,12 +1081,13 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
     <ClCompile Include="..\scripting\engine_v8.cpp" />
     <ClCompile Include="..\scripting\v8_db.cpp" />
     <ClCompile Include="..\scripting\v8_utils.cpp" />
-    <ClCompile Include="..\scripting\v8_wrapper.cpp" />
     <ClCompile Include="..\util\concurrency\mutexdebugger.cpp" />
     <ClCompile Include="..\util\fail_point.cpp" />
     <ClCompile Include="..\util\fail_point_registry.cpp" />
     <ClCompile Include="..\util\fail_point_service.cpp" />
+    <ClCompile Include="..\util\file.cpp" />
     <ClCompile Include="..\util\net\ssl_manager.cpp" />
+    <ClCompile Include="..\util\platform_init.cpp" />
     <ClCompile Include="..\util\processinfo.cpp" />
     <ClCompile Include="..\util\safe_num.cpp" />
     <ClCompile Include="..\util\time_support.cpp" />
@@ -1222,6 +1223,8 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\third_party\run_if_newer.js" />
+    <None Include="..\..\third_party\v8\ChangeLog" />
+    <None Include="..\..\third_party\v8\ChangeLog_10gen" />
     <None Include="..\..\third_party\v8\src\apinatives.js" />
     <None Include="..\..\third_party\v8\src\array.js" />
     <None Include="..\..\third_party\v8\src\collection.js" />
@@ -1566,18 +1569,20 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
     <ClInclude Include="..\base\initializer_dependency_graph.h" />
     <ClInclude Include="..\base\initializer_function.h" />
     <ClInclude Include="..\base\make_string_vector.h" />
+    <ClInclude Include="..\base\owned_pointer_map.h" />
     <ClInclude Include="..\base\owned_pointer_vector.h" />
     <ClInclude Include="..\base\parse_number.h" />
     <ClInclude Include="..\base\status.h" />
+    <ClInclude Include="..\base\string_data-inl.h" />
     <ClInclude Include="..\bson\bson.h" />
     <ClInclude Include="..\bson\bson_builder_base.h" />
     <ClInclude Include="..\bson\bson_field.h" />
+    <ClInclude Include="..\bson\bson_validate.h" />
     <ClInclude Include="..\bson\mutable\mutable_bson.h" />
     <ClInclude Include="..\bson\mutable\mutable_bson_builder.h" />
     <ClInclude Include="..\bson\mutable\mutable_bson_heap.h" />
     <ClInclude Include="..\bson\mutable\mutable_bson_internal.h" />
     <ClInclude Include="..\bson\util\bson_extract.h" />
-    <ClInclude Include="..\client\authentication_table.h" />
     <ClInclude Include="..\client\dbclientinterface.h" />
     <ClInclude Include="..\platform\atomic_intrinsics.h" />
     <ClInclude Include="..\platform\atomic_intrinsics_win32.h" />
@@ -1597,7 +1602,6 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
     <ClInclude Include="..\scripting\engine_v8.h" />
     <ClInclude Include="..\scripting\v8_db.h" />
     <ClInclude Include="..\scripting\v8_utils.h" />
-    <ClInclude Include="..\scripting\v8_wrapper.h" />
     <ClInclude Include="..\util\bson_util.h" />
     <ClInclude Include="..\util\elapsed_tracker.h" />
     <ClInclude Include="..\util\exit_code.h" />
@@ -1655,11 +1659,10 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
     <ClInclude Include="..\client\undef_macros.h" />
     <ClInclude Include="..\db\client.h" />
     <ClInclude Include="..\db\clientcursor.h" />
-    <ClInclude Include="..\db\client_common.h" />
+    <ClInclude Include="..\db\client_basic.h" />
     <ClInclude Include="..\db\cloner.h" />
     <ClInclude Include="..\db\cmdline.h" />
     <ClInclude Include="..\db\commands.h" />
-    <ClInclude Include="..\db\concurrency.h" />
     <ClInclude Include="..\db\curop-inl.h" />
     <ClInclude Include="..\db\curop.h" />
     <ClInclude Include="..\db\cursor.h" />
@@ -1683,7 +1686,6 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
     <ClInclude Include="linenoise.h" />
     <ClInclude Include="..\db\matcher.h" />
     <ClInclude Include="..\db\mongommf.h" />
-    <ClInclude Include="..\db\mongomutex.h" />
     <ClInclude Include="..\db\namespace-inl.h" />
     <ClInclude Include="..\db\namespace.h" />
     <ClInclude Include="..\db\namespacestring.h" />
@@ -1703,8 +1705,6 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
     <ClInclude Include="..\db\repl\rs_exception.h" />
     <ClInclude Include="..\db\repl\rs_member.h" />
     <ClInclude Include="..\db\repl\rs_optime.h" />
-    <ClInclude Include="..\db\security.h" />
-    <ClInclude Include="..\db\security_common.h" />
     <ClInclude Include="..\db\stats\top.h" />
     <ClInclude Include="..\pch.h" />
     <ClInclude Include="..\scripting\engine.h" />

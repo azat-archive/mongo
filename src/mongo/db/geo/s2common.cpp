@@ -93,25 +93,38 @@ namespace mongo {
         return queryBuilder.obj();
     }
 
-    bool GeoQueryField::parseFrom(BSONObj& obj) {
-        if (GeoJSONParser::isPolygon(obj)) {
+    string QueryGeometry::toString() const {
+        stringstream ss;
+        ss << "field = " << field;
+        if (NULL != cell.get()) {
+            ss << ", cell";
+        } else if (NULL != line.get()) {
+            ss << ", line = ";
+        } else if (NULL != polygon.get()) {
+            ss << ", polygon = ";
+        }
+        return ss.str();
+    }
+
+    bool QueryGeometry::parseFrom(const BSONObj& obj) {
+        if (GeoParser::isPolygon(obj)) {
             // We can't really pass these things around willy-nilly except by ptr.
-            polygon = new S2Polygon();
-            GeoJSONParser::parsePolygon(obj, polygon);
-        } else if (GeoJSONParser::isPoint(obj)) {
-            cell = new S2Cell();
-            GeoJSONParser::parsePoint(obj, cell);
-        } else if (GeoJSONParser::isLineString(obj)) {
-            line = new S2Polyline();
-            GeoJSONParser::parseLineString(obj, line);
+            polygon.reset(new S2Polygon());
+            GeoParser::parsePolygon(obj, polygon.get());
+        } else if (GeoParser::isPoint(obj)) {
+            cell.reset(new S2Cell());
+            GeoParser::parsePoint(obj, cell.get());
+        } else if (GeoParser::isLineString(obj)) {
+            line.reset(new S2Polyline());
+            GeoParser::parseLineString(obj, line.get());
         } else {
             return false;
         }
         return true;
     }
 
-    // Does this (GeoQueryField) intersect the provided data?
-    bool GeoQueryField::intersectsPoint(const S2Cell &otherPoint) {
+    // Does this (QueryGeometry) intersect the provided data?
+    bool QueryGeometry::intersectsPoint(const S2Cell &otherPoint) {
         if (NULL != cell) {
             return cell->MayIntersect(otherPoint);
         } else if (NULL != line) {
@@ -121,11 +134,11 @@ namespace mongo {
         }
     }
 
-    bool GeoQueryField::intersectsLine(const S2Polyline& otherLine) {
+    bool QueryGeometry::intersectsLine(const S2Polyline& otherLine) {
         if (NULL != cell) {
             return otherLine.MayIntersect(*cell);
         } else if (NULL != line) {
-            return otherLine.Intersects(line);
+            return otherLine.Intersects(line.get());
         } else {
             // TODO(hk): modify s2 library to just let us know if it intersected
             // rather than returning all this.
@@ -138,23 +151,26 @@ namespace mongo {
         return false;
     }
 
-    bool GeoQueryField::intersectsPolygon(const S2Polygon& otherPolygon) {
+    bool QueryGeometry::intersectsPolygon(const S2Polygon& otherPolygon) {
         if (NULL != cell) {
             return otherPolygon.MayIntersect(*cell);
         } else if (NULL != line) {
             // TODO(hk): modify s2 library to just let us know if it intersected
             // rather than returning all this.
             vector<S2Polyline*> clipped;
-            otherPolygon.IntersectWithPolyline(line, &clipped);
+            otherPolygon.IntersectWithPolyline(line.get(), &clipped);
             bool ret = clipped.size() > 0;
             for (size_t i = 0; i < clipped.size(); ++i) delete clipped[i];
             return ret;
         } else {
-            return otherPolygon.Intersects(polygon);
+            return otherPolygon.Intersects(polygon.get());
         }
     }
 
-    S2Point GeoQueryField::getCentroid() const {
+    S2Point QueryGeometry::getCentroid() const {
+        // TODO(hk): If the projection is planar this isn't valid.  Fix this
+        // when we actually use planar projections, or remove planar projections
+        // from the code.
         if (NULL != cell) {
             return cell->GetCenter();
         } else if (NULL != line) {
@@ -165,7 +181,7 @@ namespace mongo {
         }
     }
 
-    const S2Region& GeoQueryField::getRegion() const {
+    const S2Region& QueryGeometry::getRegion() const {
         if (NULL != cell) {
             return *cell;
         } else if (NULL != line) {
@@ -173,16 +189,6 @@ namespace mongo {
         } else {
             verify(NULL != polygon);
             return *polygon;
-        }
-    }
-
-    void GeoQueryField::free() {
-        if (NULL != cell) {
-            delete cell;
-        } else if (NULL != line) {
-            delete line;
-        } else if (NULL != polygon) {
-            delete polygon;
         }
     }
 }  // namespace mongo

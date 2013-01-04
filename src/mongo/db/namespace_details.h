@@ -97,7 +97,7 @@ namespace mongo {
         unsigned long long reservedA;
         long long extraOffset;                // where the $extra info is located (bytes relative to this)
     public:
-        int indexBuildInProgress;             // 1 if in prog
+        int indexBuildsInProgress;            // Number of indexes currently being built
     private:
         int _userFlags;
         char reserved[72];
@@ -182,7 +182,7 @@ namespace mongo {
         /* when a background index build is in progress, we don't count the index in nIndexes until
            complete, yet need to still use it in _indexRecord() - thus we use this function for that.
         */
-        int nIndexesBeingBuilt() const { return nIndexes + indexBuildInProgress; }
+        int getTotalIndexCount() const { return nIndexes + indexBuildsInProgress; }
 
         /* NOTE: be careful with flags.  are we manipulating them in read locks?  if so,
                  this isn't thread safe.  TODO
@@ -196,12 +196,6 @@ namespace mongo {
         };
 
         IndexDetails& idx(int idxNo, bool missingExpected = false );
-
-        /** get the IndexDetails for the index currently being built in the background. (there is at most one) */
-        IndexDetails& inProgIdx() {
-            DEV verify(indexBuildInProgress);
-            return idx(nIndexes);
-        }
 
         class IndexIterator {
         public:
@@ -225,7 +219,7 @@ namespace mongo {
            for these, we have to do some dedup work on queries.
         */
         bool isMultikey(int i) const { return (multiKeyIndexBits & (((unsigned long long) 1) << i)) != 0; }
-        void setIndexIsMultikey(const char *thisns, int i);
+        void setIndexIsMultikey(const char *thisns, int i, bool multikey = true);
 
         /**
          * This fetches the IndexDetails for the next empty index slot. The caller must populate
@@ -314,6 +308,12 @@ namespace mongo {
         const IndexDetails* findIndexByPrefix( const BSONObj &keyPattern ,
                                                bool requireSingleKey );
 
+        /* Updates the expireAfterSeconds field of the given index to the value in newExpireSecs.
+         * The specified index must already contain an expireAfterSeconds field, and the value in
+         * that field and newExpireSecs must both be numeric.
+         */
+        void updateTTLIndex( int idxNo , const BSONElement& newExpireSecs );
+
 
         const int systemFlags() const { return _systemFlags; }
         bool isSystemFlagSet( int flag ) const { return _systemFlags & flag; }
@@ -374,7 +374,10 @@ namespace mongo {
         */
         DiskLoc allocWillBeAt(const char *ns, int lenToAlloc);
 
-        /* allocate a new record.  lenToAlloc includes headers. */
+        /** allocate space for a new record from deleted lists.
+            @param lenToAlloc is WITH header
+            @return null diskloc if no room - allocate a new extent then
+        */
         DiskLoc alloc(const char* ns, int lenToAlloc);
 
         /* add a given record to the deleted chains for this NS */
@@ -507,7 +510,7 @@ namespace mongo {
          * - covered indexes
          * - in memory sorting
          */
-        static shared_ptr<Cursor> getCursor( const char* ns,
+        static shared_ptr<Cursor> getCursor( const StringData& ns,
                                              const BSONObj& query,
                                              const BSONObj& order = BSONObj(),
                                              const QueryPlanSelectionPolicy& planPolicy =
@@ -633,7 +636,7 @@ namespace mongo {
         void add_ns(const char *ns, DiskLoc& loc, bool capped);
         void add_ns( const char *ns, const NamespaceDetails &details );
 
-        NamespaceDetails* details(const char *ns) {
+        NamespaceDetails* details(const StringData& ns) {
             if ( !ht )
                 return 0;
             Namespace n(ns);

@@ -1131,16 +1131,25 @@ jsTestPath = function(){
     return "__unknown_path__"
 }
 
+var _jsTestOptions = { enableTestCommands : true }; // Test commands should be enabled by default
+
 jsTestOptions = function(){
-    if( TestData ) return { noJournal : TestData.noJournal,
-                            noJournalPrealloc : TestData.noJournalPrealloc,
-                            auth : TestData.auth,
-                            keyFile : TestData.keyFile,
-                            authUser : "__system",
-                            authPassword : TestData.keyFileData,
-                            adminUser : "admin",
-                            adminPassword : "password" }
-    return {}
+    if( TestData ) {
+        return Object.merge(_jsTestOptions,
+                            { noJournal : TestData.noJournal,
+                              noJournalPrealloc : TestData.noJournalPrealloc,
+                              auth : TestData.auth,
+                              keyFile : TestData.keyFile,
+                              authUser : "__system",
+                              authPassword : TestData.keyFileData,
+                              adminUser : TestData.adminUser || "admin",
+                              adminPassword : TestData.adminPassword || "password" });
+    }
+    return _jsTestOptions;
+}
+
+setJsTestOption = function(name, value) {
+    _jsTestOptions[name] = value;
 }
 
 jsTestLog = function(msg){
@@ -1153,6 +1162,7 @@ jsTest.name = jsTestName
 jsTest.file = jsTestFile
 jsTest.path = jsTestPath
 jsTest.options = jsTestOptions
+jsTest.setOption = setJsTestOption
 jsTest.log = jsTestLog
 
 jsTest.dir = function(){
@@ -1197,9 +1207,14 @@ jsTest.authenticate = function(conn) {
                            // Set authenticated to stop an infinite recursion from getDB calling
                            // back into authenticate.
                            conn.authenticated = true;
-                           print ("Authenticating to admin user on connection: " + conn);
-                           conn.authenticated = conn.getDB('admin').auth(
-                               jsTestOptions().adminUser, jsTestOptions().adminPassword);
+                           print ("Authenticating to admin database as " +
+                                  jsTestOptions().adminUser + " with mechanism " +
+                                  DB.prototype._defaultAuthenticationMechanism +
+                                  " on connection: " + conn);
+                           conn.authenticated = conn.getDB('admin').auth({
+                               user: jsTestOptions().adminUser,
+                               pwd: jsTestOptions().adminPassword
+                           });
                            return conn.authenticated;
                        });
     } catch (e) {
@@ -1564,6 +1579,18 @@ shellHelper.show = function (what) {
         return ""
     }
 
+    if (what == "startupWarnings" ) {
+        if ( db ) {
+            var res = db.adminCommand( { getLog : "startupWarnings" } );
+            if ( res.ok ) {
+                print( "Server has startup warnings: " );
+                for ( var i=0; i<res.log.length; i++){
+                    print( res.log[i] )
+                }
+                return "";
+            }
+        }
+    }
 
     throw "don't know how to show [" + what + "]";
 

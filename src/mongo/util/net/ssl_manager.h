@@ -25,27 +25,92 @@
 #include <openssl/ssl.h>
 
 namespace mongo {
+    class SSLParams {
+    public:
+        SSLParams(const std::string& pemfile, 
+                  const std::string& pempwd,
+                  const std::string& cafile = "",
+                  const std::string& crlfile = "",
+                  bool forceCertificateValidation = false) :
+            pemfile(pemfile),
+            pempwd(pempwd),
+            cafile(cafile),
+            crlfile(crlfile),
+            forceCertificateValidation(forceCertificateValidation) {};
+
+        std::string pemfile;
+        std::string pempwd;
+        std::string cafile;
+        std::string crlfile;
+        bool forceCertificateValidation;
+    };
+
     class SSLManager {
     MONGO_DISALLOW_COPYING(SSLManager);
     public:
-        SSLManager( bool client );
-        
-        /** @return true if was successful, otherwise false */
-        bool setupPEM( const std::string& keyFile , const std::string& password );
-        void setupPubPriv( const std::string& privateKeyFile , const std::string& publicKeyFile );
+        explicit SSLManager(const SSLParams& params);
 
         /**
-         * creates an SSL context to be used for this file descriptor
-         * caller should delete
+         * Initiates a TLS connection.
+         * Throws SocketException on failure.
+         * @return a pointer to an SSL context; caller must SSL_free it.
          */
-        SSL * secure( int fd );
-        
+        SSL* connect(int fd);
+
+        /**
+         * Waits for the other side to initiate a TLS connection.
+         * Throws SocketException on failure.
+         * @return a pointer to an SSL context; caller must SSL_free it.
+         */
+        SSL* accept(int fd);
+
+        /**
+         * Fetches a peer certificate and validates it if it exists
+         * Throws SocketException on failure
+         */
+        void validatePeerCertificate(const SSL* ssl);
+
+        /**
+         * Callbacks for SSL functions
+         */
         static int password_cb( char *buf,int num, int rwflag,void *userdata );
+        static int verify_cb(int ok, X509_STORE_CTX *ctx);
 
     private:
-        bool _client;
         SSL_CTX* _context;
         std::string _password;
+        bool _validateCertificates;
+        bool _forceValidation;
+        /**
+         * creates an SSL context to be used for this file descriptor.
+         * caller must SSL_free it.
+         */
+        SSL* _secure(int fd);
+
+        /**
+         * Fetches the error text for an error code, in a thread-safe manner.
+         */
+        std::string _getSSLErrorMessage(int code);
+
+        /**
+         * Given an error code from an SSL-type IO function, logs an 
+         * appropriate message and throws a SocketException
+         */
+        void _handleSSLError(int code);
+
+        /** @return true if was successful, otherwise false */
+        bool _setupPEM( const std::string& keyFile , const std::string& password );
+
+        /*
+         * Set up SSL for certificate validation by loading a CA
+         */
+        bool _setupCA(const std::string& caFile);
+
+        /*
+         * Import a certificate revocation list into our SSL context
+         * for use with validating certificates
+         */
+        bool _setupCRL(const std::string& crlFile);
     };
 }
 #endif

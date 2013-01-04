@@ -33,11 +33,6 @@
 
 namespace mongo {
 
-    struct ShardNS {
-        static string mongos;
-        static string settings;
-    };
-
     class ConfigServer;
 
     class DBConfig;
@@ -232,11 +227,6 @@ namespace mongo {
         int dbConfigVersion( DBClientBase& conn );
 
         void reloadSettings();
-
-        /**
-         * @return 0 = ok, otherwise error #
-         */
-        int checkConfigVersion( bool upgrade );
 
         /**
          * Create a metadata change log entry in the config.changelog collection.

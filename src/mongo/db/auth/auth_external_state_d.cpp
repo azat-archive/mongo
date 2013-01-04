@@ -20,20 +20,33 @@
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/client.h"
+#include "mongo/db/dbhelpers.h"
+#include "mongo/db/d_concurrency.h"
 #include "mongo/db/instance.h"
-#include "mongo/util/debug_util.h"
+#include "mongo/db/jsobj.h"
 
 namespace mongo {
 
     AuthExternalStateMongod::AuthExternalStateMongod() {}
     AuthExternalStateMongod::~AuthExternalStateMongod() {}
 
-    Status AuthExternalStateMongod::getPrivilegeDocument(const string& dbname,
-                                                         const string& principalName,
-                                                         BSONObj* result) {
+    void AuthExternalStateMongod::startRequest() {
+        if (!Lock::isLocked()) {
+            _checkShouldAllowLocalhost();
+        }
+    }
+
+    bool AuthExternalStateMongod::_findUser(const string& usersNamespace,
+                                            const BSONObj& query,
+                                            BSONObj* result) const {
         Client::GodScope gs;
-        DBDirectClient conn;
-        return getPrivilegeDocumentOverConnection(&conn, dbname, principalName, result);
+        Client::ReadContext ctx(usersNamespace);
+
+        return Helpers::findOne(usersNamespace, query, *result);
+    }
+
+    bool AuthExternalStateMongod::shouldIgnoreAuthChecks() const {
+        return cc().isGod() || AuthExternalStateServerCommon::shouldIgnoreAuthChecks();
     }
 
 } // namespace mongo

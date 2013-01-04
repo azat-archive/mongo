@@ -21,6 +21,7 @@
 #include <typeinfo>
 #include <string>
 
+#include "mongo/base/status.h" // NOTE: This is safe as utils depend on base
 #include "mongo/bson/inline_decls.h"
 #include "mongo/platform/compiler.h"
 
@@ -100,6 +101,16 @@ namespace mongo {
             _ei.msg = str + causedBy( _ei.msg );
         }
 
+        // Utilities for the migration to Status objects
+        static ErrorCodes::Error convertExceptionCode(int exCode);
+
+        Status toStatus(const std::string& context) const {
+            return Status(convertExceptionCode(getCode()), context + causedBy(*this));
+        }
+        Status toStatus() const {
+            return Status(convertExceptionCode(getCode()), this->toString());
+        }
+
         // context when applicable. otherwise ""
         std::string _shard;
 
@@ -175,6 +186,10 @@ namespace mongo {
     inline std::string causedBy( const DBException& e ){ return causedBy( e.toString().c_str() ); }
     inline std::string causedBy( const std::exception& e ){ return causedBy( e.what() ); }
     inline std::string causedBy( const std::string& e ){ return causedBy( e.c_str() ); }
+    inline std::string causedBy( const std::string* e ){
+        return (e && *e != "") ? causedBy(*e) : "";
+    }
+    inline std::string causedBy( const Status& e ){ return causedBy( e.reason() ); }
 
     /** aborts on condition failure */
     inline void fassert(int msgid, bool testOK) {if (MONGO_unlikely(!testOK)) fassertFailed(msgid);}
@@ -182,6 +197,13 @@ namespace mongo {
 
     /* "user assert".  if asserts, user did something wrong, not our code */
 #define MONGO_uassert(msgid, msg, expr) (void)( MONGO_likely(!!(expr)) || (mongo::uasserted(msgid, msg), 0) )
+
+#define MONGO_uassertStatusOK(expr) do {                                  \
+        Status status = (expr);                                         \
+        if (!status.isOK())                                             \
+            uasserted(status.location() != 0 ? status.location() : status.code(), \
+                      status.reason());                                 \
+    } while(0)
 
     /* warning only - keeps going */
 #define MONGO_wassert(_Expression) (void)( MONGO_likely(!!(_Expression)) || (mongo::wasserted(#_Expression, __FILE__, __LINE__), 0) )
@@ -218,6 +240,7 @@ namespace mongo {
 # define dassert MONGO_dassert
 # define verify MONGO_verify
 # define uassert MONGO_uassert
+# define uassertStatusOK MONGO_uassertStatusOK
 # define wassert MONGO_wassert
 # define massert MONGO_massert
 #endif

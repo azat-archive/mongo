@@ -39,7 +39,6 @@
 #include "db.h"
 #include "instance.h"
 #include "lasterror.h"
-#include "security.h"
 #include "../scripting/engine.h"
 #include "stats/counters.h"
 #include "background.h"
@@ -117,22 +116,18 @@ namespace mongo {
             help << "get version #, etc.\n";
             help << "{ buildinfo:1 }";
         }
+
         bool run(const std::string& dbname,
                  BSONObj& jsobj,
                  int, // options
                  std::string& errmsg,
                  BSONObjBuilder& result,
                  bool fromRepl) {
-            result << "version" << versionString
-                   << "gitVersion" << gitVersion()
-                   << "sysInfo" << sysInfo()
-                   << "versionArray" << versionArray
-                   << "interpreterVersion" << globalScriptEngine->getInterpreterVersionString()
-                   << "bits" << ( sizeof( int* ) == 4 ? 32 : 64 );
-            result.appendBool( "debug" , debug );
-            result.appendNumber("maxBsonObjectSize", BSONObjMaxUserSize);
-            return true;
+        appendBuildInfo(result);
+        return true;
+
         }
+
     } cmdBuildInfo;
 
 
@@ -322,6 +317,7 @@ namespace mongo {
         AvailableQueryOptions() : Command( "availableQueryOptions" , false , "availablequeryoptions" ) {}
         virtual bool slaveOk() const { return true; }
         virtual LockType locktype() const { return NONE; }
+        virtual bool requiresAuth() { return false; }
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {} // No auth required

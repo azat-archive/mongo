@@ -21,7 +21,6 @@
 #include <boost/thread/thread.hpp>
 
 #include "mongo/base/initializer.h"
-#include "mongo/db/commands/fail_point_cmd.h"
 #include "mongo/db/initialize_server_global_state.h"
 #include "../util/net/message.h"
 #include "../util/startup_test.h"
@@ -44,10 +43,11 @@
 #include "balance.h"
 #include "grid.h"
 #include "cursors.h"
-#include "shard_version.h"
 #include "../util/processinfo.h"
 #include "mongo/db/lasterror.h"
+#include "mongo/s/config_upgrade.h"
 #include "mongo/util/stacktrace.h"
+#include "mongo/util/exception_filter_win32.h"
 
 #if defined(_WIN32)
 # include "../util/ntservice.h"
@@ -94,9 +94,7 @@ namespace mongo {
         virtual ~ShardedMessageHandler() {}
 
         virtual void connected( AbstractMessagingPort* p ) {
-            ClientInfo *c = ClientInfo::create(p);
-            if( p->remote().isLocalHost() )
-                c->getAuthenticationInfo()->setIsALocalHostConnectionWithSpecialAuthPowers();
+            ClientInfo::create(p);
         }
 
         virtual void process( Message& m , AbstractMessagingPort* p , LastError * le) {
@@ -176,6 +174,7 @@ namespace mongo {
         signal( SIGPIPE , SIG_IGN );
 #endif
 
+        setWindowsUnhandledExceptionFilter();
         set_new_handler( my_new_handler );
     }
 
@@ -262,16 +261,22 @@ static bool runMongosServer( bool doUpgrade ) {
         task::repeat(new CheckConfigServers, 60*1000);
     }
 
-    int configError = configServer.checkConfigVersion( doUpgrade );
-    if ( configError ) {
-        if ( configError > 0 ) {
-            log() << "upgrade success!" << endl;
-        }
-        else {
-            log() << "config server error: " << configError << endl;
-        }
+    VersionType initVersionInfo;
+    VersionType versionInfo;
+    string errMsg;
+    bool upgraded = checkAndUpgradeConfigVersion(ConnectionString(configServer.getPrimary()
+                                                         .getConnString()),
+                                                 doUpgrade,
+                                                 &initVersionInfo,
+                                                 &versionInfo,
+                                                 &errMsg);
+
+    if (!upgraded) {
+        error() << "error upgrading config database to v" << CURRENT_CONFIG_VERSION
+                << causedBy(errMsg) << endl;
         return false;
     }
+
     configServer.reloadSettings();
 
     init();
@@ -425,10 +430,6 @@ static void processCommandLineOptions(const std::vector<std::string>& argv) {
 
     if( configdbs.size() == 1 ) {
         warning() << "running with 1 config server should be done only for testing purposes and is not recommended for production" << endl;
-    }
-
-    if (params.count("enableFaultInjection")) {
-        enableFailPointCmd();
     }
 
     _isUpgradeSwitchSet = params.count("upgrade");

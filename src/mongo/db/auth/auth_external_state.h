@@ -21,6 +21,7 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
 #include "mongo/client/dbclientinterface.h"
+#include "mongo/db/auth/principal_name.h"
 
 namespace mongo {
 
@@ -39,35 +40,35 @@ namespace mongo {
 
         // Returns true if this connection should be treated as if it has full access to do
         // anything, regardless of the current auth state.  Currently the reasons why this could be
-        // are that auth isn't enabled, the connection is from localhost and there are admin users,
-        // or the connection is a "god" connection.
+        // are that auth isn't enabled, the connection is from localhost and there are no admin
+        // users, or the connection is a "god" connection.
+        // NOTE: _checkShouldAllowLocalhost MUST be called at least once before any call to
+        // shouldIgnoreAuthChecks or we could ignore auth checks incorrectly.
         virtual bool shouldIgnoreAuthChecks() const = 0;
 
-        // adminDBConnection is a connection that can be used to access the admin database.  It is
-        // used to determine if there are any admin users configured for the cluster, and thus if
-        // localhost connections should be given special admin access.
-        // This function *must* be called on any new AuthExternalState, after the constructor but
-        // before any other methods are called on the AuthExternalState.
-        virtual Status initialize(DBClientBase* adminDBConnection) = 0;
+        // Should be called at the beginning of every new request.  This performs the checks
+        // necessary to determine if localhost connections should be given full access.
+        virtual void startRequest() = 0;
 
         // Gets the privilege information document for "principalName" on "dbname".
         //
         // On success, returns Status::OK() and stores a shared-ownership copy of the document into
         // "result".
-        virtual Status getPrivilegeDocument(const std::string& dbname,
-                                            const std::string& principalName,
-                                            BSONObj* result) = 0;
-
+        Status getPrivilegeDocument(const std::string& dbname,
+                                    const PrincipalName& principalName,
+                                    BSONObj* result);
 
     protected:
-        // Look up the privilege document for "principalName" in database "dbname", over "conn".
-        static Status getPrivilegeDocumentOverConnection(DBClientBase* conn,
-                                                         const std::string& dbname,
-                                                         const std::string& userName,
-                                                         BSONObj* result);
-
-
         AuthExternalState(); // This class should never be instantiated directly.
+
+        // Queries the userNamespace with the given query and returns the privilegeDocument found
+        // in *result.  Returns true if it finds a document matching the query, or false if not.
+        virtual bool _findUser(const std::string& usersNamespace,
+                               const BSONObj& query,
+                               BSONObj* result) const = 0;
+
+        // Returns true if there exists at least one privilege document in the given database.
+        bool _hasPrivilegeDocument(const std::string& dbname) const;
     };
 
 } // namespace mongo

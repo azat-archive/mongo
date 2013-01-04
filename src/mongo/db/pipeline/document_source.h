@@ -38,6 +38,7 @@ namespace mongo {
     class ExpressionContext;
     class ExpressionFieldPath;
     class ExpressionObject;
+    class DocumentSourceLimit;
     class Matcher;
 
     class DocumentSource :
@@ -179,6 +180,13 @@ namespace mongo {
          */
         static BSONObj depsToProjection(const set<string>& deps);
 
+        /** These functions take the same input as depsToProjection but are able to
+         *  produce a Document from a BSONObj with the needed fields much faster.
+         */
+        typedef Document ParsedDeps; // See implementation for structure
+        static ParsedDeps parseDeps(const set<string>& deps);
+        static Document documentFromBsonWithDeps(const BSONObj& object, const ParsedDeps& deps);
+
         /**
           Add the DocumentSource to the array builder.
 
@@ -186,11 +194,13 @@ namespace mongo {
           convert the inner part of the object which will be added to the
           array being built here.
 
+          A subclass may choose to overwrite this rather than addToBsonArray
+          if it should output multiple stages.
+
           @param pBuilder the array builder to add the operation to.
           @param explain create explain output
          */
-        virtual void addToBsonArray(BSONArrayBuilder *pBuilder,
-            bool explain = false) const;
+        virtual void addToBsonArray(BSONArrayBuilder *pBuilder, bool explain=false) const;
         
     protected:
         /**
@@ -432,7 +442,7 @@ namespace mongo {
          */
         void setSort(const shared_ptr<BSONObj> &pBsonObj);
 
-        void setProjection(BSONObj projection);
+        void setProjection(const BSONObj& projection, const ParsedDeps& deps);
     protected:
         // virtuals from DocumentSource
         virtual void sourceToBson(BSONObjBuilder *pBuilder, bool explain) const;
@@ -458,6 +468,7 @@ namespace mongo {
         shared_ptr<BSONObj> pQuery;
         shared_ptr<BSONObj> pSort;
         shared_ptr<Projection> _projection; // shared with pClientCursor
+        ParsedDeps _dependencies;
 
         shared_ptr<CursorWithContext> _cursorWithContext;
 
@@ -600,6 +611,7 @@ namespace mongo {
         virtual const char *getSourceName() const;
         virtual Document getCurrent();
         virtual GetDepsReturn getDependencies(set<string>& deps) const;
+        virtual void dispose();
 
         /**
           Create a new grouping DocumentSource.
@@ -702,7 +714,6 @@ namespace mongo {
         Document makeDocument(const GroupsType::iterator &rIter);
 
         GroupsType::iterator groupsIterator;
-        Document pCurrent;
     };
 
 
@@ -848,29 +859,17 @@ namespace mongo {
         virtual bool advance();
         virtual const char *getSourceName() const;
         virtual Document getCurrent();
+        virtual void addToBsonArray(BSONArrayBuilder *pBuilder, bool explain=false) const;
+        virtual bool coalesce(const intrusive_ptr<DocumentSource> &pNextSource);
+        virtual void dispose();
 
         virtual GetDepsReturn getDependencies(set<string>& deps) const;
 
-        /*
-          TODO
-          Adjacent sorts should reduce to the last sort.
-        virtual bool coalesce(const intrusive_ptr<DocumentSource> &pNextSource);
-        */
-
-        /**
-          Create a new sorting DocumentSource.
-          
-          @param pExpCtx the expression context for the pipeline
-          @returns the DocumentSource
-         */
-        static intrusive_ptr<DocumentSourceSort> create(
-            const intrusive_ptr<ExpressionContext> &pExpCtx);
-
         // Virtuals for SplittableDocumentSource
-        // All work for sort is done in router currently
-        // TODO: do partial sorts on the shards then merge in the router
-        //       Not currently possible due to DocumentSource's cursor-like interface
-        virtual intrusive_ptr<DocumentSource> getShardSource() { return NULL; }
+        // All work for sort is done in router currently if there is no limit.
+        // If there is a limit, the $sort/$limit combination is performed on the
+        // shards, then the results are resorted and limited on mongos
+        virtual intrusive_ptr<DocumentSource> getShardSource() { return limitSrc ? this : NULL; }
         virtual intrusive_ptr<DocumentSource> getRouterSource() { return this; }
 
         /**
@@ -908,12 +907,23 @@ namespace mongo {
             BSONElement *pBsonElement,
             const intrusive_ptr<ExpressionContext> &pExpCtx);
 
+        /// Create a DocumentSourceSort with a given sort and (optional) limit
+        static intrusive_ptr<DocumentSourceSort> create(
+            const intrusive_ptr<ExpressionContext> &pExpCtx,
+            BSONObj sortOrder,
+            long long limit=-1);
+
+        /// returns -1 for no limit
+        long long getLimit() const;
+
+        intrusive_ptr<DocumentSourceLimit> getLimitSrc() const { return limitSrc; }
 
         static const char sortName[];
-
     protected:
         // virtuals from DocumentSource
-        virtual void sourceToBson(BSONObjBuilder *pBuilder, bool explain) const;
+        virtual void sourceToBson(BSONObjBuilder *pBuilder, bool explain) const {
+            verify(false); // should call addToBsonArray instead
+        }
 
     private:
         DocumentSourceSort(const intrusive_ptr<ExpressionContext> &pExpCtx);
@@ -927,20 +937,25 @@ namespace mongo {
         void populate();
         bool populated;
 
+        // These are called by populate()
+        void populateAll();  // no limit
+        void populateOne();  // limit == 1
+        void populateTopK(); // limit > 1
+
         /* these two parallel each other */
         typedef vector<intrusive_ptr<ExpressionFieldPath> > SortPaths;
         SortPaths vSortKey;
-        vector<bool> vAscending;
+        vector<char> vAscending; // used like vector<bool> but without specialization
 
-        /*
-          Compare two documents according to the specified sort key.
+        struct KeyAndDoc {
+            explicit KeyAndDoc(const Document& d, const SortPaths& sp); // extracts sort key
+            Value key; // array of keys if vSortKey.size() > 1
+            Document doc;
+        };
+        friend void swap(KeyAndDoc& l, KeyAndDoc& r);
 
-          @param rL reference to the left document
-          @param rR reference to the right document
-          @returns a number less than, equal to, or greater than zero,
-            indicating pL < pR, pL == pR, or pL > pR, respectively
-         */
-        int compare(const Document& pL, const Document& pR);
+        /// Compare two KeyAndDocs according to the specified sort key.
+        int compare(const KeyAndDoc& lhs, const KeyAndDoc& rhs) const;
 
         /*
           This is a utility class just for the STL sort that is done
@@ -948,25 +963,22 @@ namespace mongo {
          */
         class Comparator {
         public:
-            bool operator()(const Document& pL, const Document& pR) {
-                return (pSort->compare(pL, pR) < 0);
+            explicit Comparator(const DocumentSourceSort& source): _source(source) {}
+            bool operator()(const KeyAndDoc& lhs, const KeyAndDoc& rhs) const {
+                return (_source.compare(lhs, rhs) < 0);
             }
-
-            inline Comparator(DocumentSourceSort *pS):
-                pSort(pS) {
-            }
-
         private:
-            DocumentSourceSort *pSort;
+            const DocumentSourceSort& _source;
         };
 
-        typedef vector<Document> VectorType;
-        VectorType documents;
+        deque<KeyAndDoc> documents;
 
-        VectorType::iterator docIterator;
-        Document pCurrent;
+        intrusive_ptr<DocumentSourceLimit> limitSrc;
     };
-
+    inline void swap(DocumentSourceSort::KeyAndDoc& l, DocumentSourceSort::KeyAndDoc& r) {
+        l.key.swap(r.key);
+        l.doc.swap(r.doc);
+    }
 
     class DocumentSourceLimit :
         public SplittableDocumentSource {
@@ -990,7 +1002,8 @@ namespace mongo {
           @returns the DocumentSource
          */
         static intrusive_ptr<DocumentSourceLimit> create(
-            const intrusive_ptr<ExpressionContext> &pExpCtx);
+            const intrusive_ptr<ExpressionContext> &pExpCtx,
+            long long limit);
 
         // Virtuals for SplittableDocumentSource
         // Need to run on rounter. Running on shard as well is an optimization.
@@ -1022,8 +1035,8 @@ namespace mongo {
         virtual void sourceToBson(BSONObjBuilder *pBuilder, bool explain) const;
 
     private:
-        DocumentSourceLimit(
-            const intrusive_ptr<ExpressionContext> &pExpCtx);
+        DocumentSourceLimit(const intrusive_ptr<ExpressionContext> &pExpCtx,
+                            long long limit);
 
         long long limit;
         long long count;
@@ -1154,6 +1167,71 @@ namespace mongo {
         scoped_ptr<Unwinder> _unwinder;
     };
 
+    class DocumentSourceGeoNear : public SplittableDocumentSource {
+    public:
+        // virtuals from DocumentSource
+        virtual ~DocumentSourceGeoNear();
+        virtual bool eof();
+        virtual bool advance();
+        virtual Document getCurrent();
+        virtual const char *getSourceName() const;
+        virtual void setSource(DocumentSource *pSource); // errors out since this must be first
+        virtual bool coalesce(const intrusive_ptr<DocumentSource> &pNextSource);
+
+        // Virtuals for SplittableDocumentSource
+        virtual intrusive_ptr<DocumentSource> getShardSource();
+        virtual intrusive_ptr<DocumentSource> getRouterSource();
+
+        static intrusive_ptr<DocumentSource> createFromBson(
+            BSONElement *pBsonElement,
+            const intrusive_ptr<ExpressionContext> &pCtx);
+
+        static char geoNearName[];
+
+        long long getLimit() { return limit; }
+
+        // this should only be used for testing
+        static intrusive_ptr<DocumentSourceGeoNear> create(
+            const intrusive_ptr<ExpressionContext> &pCtx);
+
+    protected:
+        // virtuals from DocumentSource
+        virtual void sourceToBson(BSONObjBuilder *pBuilder, bool explain) const;
+
+    private:
+        DocumentSourceGeoNear(const intrusive_ptr<ExpressionContext> &pExpCtx);
+
+        void parseOptions(BSONObj options);
+        BSONObj buildGeoNearCmd(const StringData& collection) const;
+        void runCommand();
+
+        // These fields describe the command to run.
+        // coords and distanceField are required, rest are optional
+        BSONObj coords; // "near" option, but near is a reserved keyword on windows
+        bool coordsIsArray;
+        scoped_ptr<FieldPath> distanceField; // Using scoped_ptr because FieldPath can't be empty
+        long long limit;
+        double maxDistance;
+        BSONObj query;
+        bool spherical;
+        double distanceMultiplier;
+        scoped_ptr<FieldPath> includeLocs;
+        bool uniqueDocs;
+
+        // These fields are injected by PipelineD. This division of labor allows the
+        // DocumentSourceGeoNear class to be linked into both mongos and mongod while
+        // allowing it to run a command using DBDirectClient when in mongod.
+        string db;
+        string collection;
+        boost::scoped_ptr<DBClientWithCommands> client; // either NULL or a DBDirectClient
+        friend class PipelineD;
+
+        // these fields are used while processing the results
+        BSONObj cmdOutput;
+        boost::scoped_ptr<BSONObjIterator> resultsIterator; // iterator over cmdOutput["results"]
+        Document currentDoc;
+        bool hasCurrent;
+    };
 }
 
 

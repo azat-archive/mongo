@@ -32,10 +32,6 @@ namespace boost {
 
 namespace mongo {
 
-#ifdef MONGO_SSL
-    class SSLManager;
-#endif
-
     /* command line options
     */
     /* concurrency: OK/READ */
@@ -139,8 +135,9 @@ namespace mongo {
         bool sslOnNormalPorts;      // --sslOnNormalPorts
         std::string sslPEMKeyFile;       // --sslPEMKeyFile
         std::string sslPEMKeyPassword;   // --sslPEMKeyPassword
-
-        SSLManager* sslServerManager; // currently leaks on close
+        std::string sslCAFile;      // --sslCAFile
+        std::string sslCRLFile;     // --sslCRLFile
+        bool sslForceCertificateValidation;
 #endif
 
         /**
@@ -192,8 +189,8 @@ namespace mongo {
         port(DefaultDBPort), rest(false), jsonp(false), indexBuildRetry(true), quiet(false),
         noTableScan(false), prealloc(true), preallocj(true), smallfiles(sizeof(int*) == 4),
         configsvr(false), quota(false), quotaFiles(8), cpu(false),
-        durOptions(0), objcheck(false), oplogSize(0), defaultProfile(0),
-        slowMS(100), defaultLocalThresholdMillis(15), pretouch(0), moveParanoia( true ),
+        durOptions(0), objcheck(true), oplogSize(0), defaultProfile(0),
+        slowMS(100), defaultLocalThresholdMillis(15), pretouch(0), moveParanoia( false ),
         syncdelay(60), noUnixSocket(false), doFork(0), socket("/tmp"), maxConns(DEFAULT_MAX_CONN),
         logAppend(false), logWithSyslog(false)
     {
@@ -212,7 +209,6 @@ namespace mongo {
 
 #ifdef MONGO_SSL
         sslOnNormalPorts = false;
-        sslServerManager = 0;
 #endif
     }
 

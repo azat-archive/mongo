@@ -26,7 +26,7 @@
 #include "mongo/db/json.h"
 #include "mongo/db/namespace-inl.h"
 #include "mongo/db/namespacestring.h"
-#include "mongo/s/util.h"
+#include "mongo/s/stale_exception.h"  // for RecvStaleConfigException
 #include "mongo/util/md5.hpp"
 
 #ifdef MONGO_SSL
@@ -368,38 +368,12 @@ namespace mongo {
         return QueryOptions(0);
     }
 
-    void DBClientWithCommands::setAuthenticationTable( const AuthenticationTable& auth ) {
-        _authTable = auth;
-        _hasAuthentication = true;
-    }
-
-    void DBClientWithCommands::clearAuthenticationTable() {
-        _authTable.clearAuth(); // This probably isn't necessary, but better to be safe.
-        _hasAuthentication = false;
-    }
-
-    bool DBClientWithCommands::hasAuthenticationTable() {
-        return _hasAuthentication;
-    }
-
-    AuthenticationTable& DBClientWithCommands::getAuthenticationTable() {
-        return _authTable;
-    }
-
     inline bool DBClientWithCommands::runCommand(const string &dbname,
                                                  const BSONObj& cmd,
                                                  BSONObj &info,
-                                                 int options,
-                                                 const AuthenticationTable* auth) {
+                                                 int options) {
         string ns = dbname + ".$cmd";
-        BSONObj actualCmd = cmd;
-        if ( _hasAuthentication || auth ) {
-            const AuthenticationTable* authTable = (auth ? auth : &_authTable);
-            LOG(4) << "Sending command " << cmd << " to " << getServerAddress() <<
-                    " with $auth: " << authTable->toBSON() << endl;
-            actualCmd = authTable->copyCommandObjAddingAuth( cmd );
-        }
-        info = findOne(ns, actualCmd, 0 , options);
+        info = findOne(ns, cmd, 0 , options);
         return isOk(info);
     }
 
@@ -583,7 +557,7 @@ namespace mongo {
         BSONObj o;
         if ( info == 0 )    info = &o;
         BSONObjBuilder b;
-        string db = nsToDatabase(ns.c_str());
+        string db = nsToDatabase(ns);
         b.append("create", ns.c_str() + db.length() + 1);
         if ( size ) b.append("size", size);
         if ( capped ) b.append("capped", true);
@@ -792,9 +766,8 @@ namespace mongo {
     inline bool DBClientConnection::runCommand(const string &dbname,
                                                const BSONObj& cmd,
                                                BSONObj &info,
-                                               int options,
-                                               const AuthenticationTable* auth) {
-        if ( DBClientWithCommands::runCommand( dbname , cmd , info , options , auth ) )
+                                               int options) {
+        if (DBClientWithCommands::runCommand(dbname, cmd, info, options))
             return true;
         
         if ( clientSet && isNotMasterErrorString( info["errmsg"] ) ) {
@@ -909,6 +882,10 @@ namespace mongo {
             n += i.n();
         }
         return n;
+    }
+
+    void DBClientConnection::setReplSetClientCallback(DBClientReplicaSet* rsClient) {
+        clientSet = rsClient;
     }
 
     unsigned long long DBClientConnection::query(
@@ -1072,7 +1049,7 @@ namespace mongo {
 
     void DBClientWithCommands::dropIndex( const string& ns , const string& indexName ) {
         BSONObj info;
-        if ( ! runCommand( nsToDatabase( ns.c_str() ) ,
+        if ( ! runCommand( nsToDatabase( ns ) ,
                            BSON( "deleteIndexes" << NamespaceString( ns ).coll << "index" << indexName ) ,
                            info ) ) {
             LOG(_logLevel) << "dropIndex failed: " << info << endl;
@@ -1083,7 +1060,7 @@ namespace mongo {
 
     void DBClientWithCommands::dropIndexes( const string& ns ) {
         BSONObj info;
-        uassert( 10008 ,  "dropIndexes failed" , runCommand( nsToDatabase( ns.c_str() ) ,
+        uassert( 10008 ,  "dropIndexes failed" , runCommand( nsToDatabase( ns ) ,
                  BSON( "deleteIndexes" << NamespaceString( ns ).coll << "index" << "*") ,
                  info ) );
         resetIndexCache();
@@ -1217,7 +1194,12 @@ namespace mongo {
     }
 
     bool DBClientConnection::recv( Message &m ) {
-        return port().recv(m);
+        if (port().recv(m)) {
+            return true;
+        }
+
+        _failed = true;
+        return false;
     }
 
     bool DBClientConnection::call( Message &toSend, Message &response, bool assertOk , string * actualServer ) {
@@ -1297,16 +1279,23 @@ namespace mongo {
     }
 
 #ifdef MONGO_SSL
-    SSLManager* DBClientConnection::sslManager() {
-        if ( _sslManager )
-            return _sslManager;
-        
-        SSLManager* s = new SSLManager(true);
-        _sslManager = s;
-        return s;
-    }
+    static SimpleMutex s_mtx("SSLManager");
+    static SSLManager* s_sslMgr(NULL);
 
-    SSLManager* DBClientConnection::_sslManager = 0;
+    SSLManager* DBClientConnection::sslManager() {
+        SimpleMutex::scoped_lock lk(s_mtx);
+        if (s_sslMgr) 
+            return s_sslMgr;
+        const SSLParams params(cmdLine.sslPEMKeyFile, 
+                               cmdLine.sslPEMKeyPassword,
+                               cmdLine.sslCAFile,
+                               cmdLine.sslCRLFile,
+                               cmdLine.sslForceCertificateValidation);
+        s_sslMgr = new SSLManager(params);
+        
+
+        return s_sslMgr;
+    }
 #endif
 
     AtomicUInt DBClientConnection::_numConnections;

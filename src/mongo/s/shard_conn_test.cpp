@@ -15,6 +15,7 @@
 
 #include "mongo/base/init.h"
 #include "mongo/client/connpool.h"
+#include "mongo/dbtests/mock/mock_conn_registry.h"
 #include "mongo/dbtests/mock/mock_dbclient_connection.h"
 #include "mongo/platform/cstdint.h"
 #include "mongo/s/shard.h"
@@ -32,6 +33,7 @@
 
 using boost::scoped_ptr;
 using mongo::DBClientBase;
+using mongo::MockRemoteDBServer;
 using mongo::ShardConnection;
 using std::string;
 using std::vector;
@@ -58,7 +60,7 @@ namespace mongo {
 }
 
 namespace mongo_test {
-    const string TARGET_HOST = "$dummy";
+    const string TARGET_HOST = "$dummy:27017";
 
     /**
      * Warning: cannot run in parallel
@@ -68,12 +70,16 @@ namespace mongo_test {
         void setUp() {
             _maxPoolSizePerHost = mongo::PoolForHost::getMaxPerHost();
 
+            mongo::ConnectionString::setConnectionHook(
+                    mongo::MockConnRegistry::get()->getConnStrHook());
             _dummyServer = new MockRemoteDBServer(TARGET_HOST);
-            mongo::ConnectionString::setConnectionHook(_dummyServer->getConnectionHook());
+            mongo::MockConnRegistry::get()->addServer(_dummyServer);
         }
 
         void tearDown() {
             ShardConnection::clearPool();
+
+            mongo::MockConnRegistry::get()->removeServer(_dummyServer->getServerAddress());
             delete _dummyServer;
 
             mongo::PoolForHost::setMaxPerHost(_maxPoolSizePerHost);
@@ -143,7 +149,7 @@ namespace mongo_test {
         uint32_t _maxPoolSizePerHost;
     };
 
-    TEST_F(ShardConnFixture, BasicScopedDbConnection) {
+    TEST_F(ShardConnFixture, BasicShardConnection) {
         ShardConnection conn1(TARGET_HOST, "test.user");
         ShardConnection conn2(TARGET_HOST, "test.user");
 
@@ -202,6 +208,58 @@ namespace mongo_test {
         conn2.done();
 
         checkNewConns(assertGreaterThan, badCreationTime, 10);
+    }
+
+    TEST_F(ShardConnFixture, BadConnClearsPoolWhenKilled) {
+        ShardConnection conn1(TARGET_HOST, "test.user");
+        ShardConnection conn2(TARGET_HOST, "test.user");
+        ShardConnection conn3(TARGET_HOST, "test.user");
+
+        conn1.done();
+        killServer();
+
+        try {
+            conn3.get()->query("test.user", mongo::Query());
+        }
+        catch (const mongo::SocketException&) {
+        }
+
+        restartServer();
+
+        const uint64_t badCreationTime = conn3.get()->getSockCreationMicroSec();
+        conn3.kill();
+        // attempting to put a 'bad' connection back to the pool
+        conn2.done();
+
+        checkNewConns(assertGreaterThan, badCreationTime, 10);
+    }
+
+    TEST_F(ShardConnFixture, KilledGoodConnShouldNotClearPool) {
+        ShardConnection conn1(TARGET_HOST, "test.user");
+        ShardConnection conn2(TARGET_HOST, "test.user");
+        ShardConnection conn3(TARGET_HOST, "test.user");
+
+        const uint64_t upperBoundCreationTime =
+                conn3.get()->getSockCreationMicroSec();
+        conn3.done();
+
+        const uint64_t badCreationTime = conn1.get()->getSockCreationMicroSec();
+        conn1.kill();
+
+        conn2.done();
+
+        ShardConnection conn4(TARGET_HOST, "test.user");
+        ShardConnection conn5(TARGET_HOST, "test.user");
+
+        ASSERT_GREATER_THAN(conn4.get()->getSockCreationMicroSec(), badCreationTime);
+        ASSERT_LESS_THAN_OR_EQUALS(conn4.get()->getSockCreationMicroSec(),
+                upperBoundCreationTime);
+
+        ASSERT_GREATER_THAN(conn5.get()->getSockCreationMicroSec(), badCreationTime);
+        ASSERT_LESS_THAN_OR_EQUALS(conn5.get()->getSockCreationMicroSec(),
+                upperBoundCreationTime);
+
+        checkNewConns(assertGreaterThan, upperBoundCreationTime, 10);
     }
 
     TEST_F(ShardConnFixture, InvalidateBadConnEvenWhenPoolIsFull) {

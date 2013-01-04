@@ -24,9 +24,9 @@
 
 namespace mongo {
     S2Cursor::S2Cursor(const BSONObj &keyPattern, const IndexDetails *details,
-                       const BSONObj &query, const vector<GeoQueryField> &fields,
+                       const BSONObj &query, const vector<QueryGeometry> &fields,
                        const S2IndexingParams &params, int numWanted)
-        : _details(details), _fields(fields), _params(params),
+        : _details(details), _fields(fields), _params(params), _nscanned(0),
           _keyPattern(keyPattern), _numToReturn(numWanted) {
         BSONObjBuilder geoFieldsToNuke;
         for (size_t i = 0; i < _fields.size(); ++i) {
@@ -37,12 +37,7 @@ namespace mongo {
         _matcher.reset(new CoveredIndexMatcher(_filteredQuery, keyPattern));
     }
 
-    S2Cursor::~S2Cursor() {
-        // We own these pointers.
-        for (size_t i = 0; i < _fields.size(); ++i) {
-            _fields[i].free();
-        }
-    }
+    S2Cursor::~S2Cursor() { }
 
     CoveredIndexMatcher* S2Cursor::matcher() const { return _matcher.get(); }
 
@@ -61,7 +56,7 @@ namespace mongo {
             // A lot of these arguments are opaque.
             FieldRangeSet frs(_details->parentNS().c_str(), makeFRSObject(), false, false);
             shared_ptr<FieldRangeVector> frv(new FieldRangeVector(frs, specForFRV, 1));
-            _btreeCursor.reset(BtreeCursor::make(nsdetails(_details->parentNS().c_str()),
+            _btreeCursor.reset(BtreeCursor::make(nsdetails(_details->parentNS()),
                                                  *_details, frv, 0, 1));
             return advance();
         }
@@ -98,7 +93,6 @@ namespace mongo {
         for (; _btreeCursor->ok(); _btreeCursor->advance()) {
             if (_seen.end() != _seen.find(_btreeCursor->currLoc())) { continue; }
             _seen.insert(_btreeCursor->currLoc());
-            ++_nscanned;
 
             MatchDetails details;
             bool matched = _matcher->matchesCurrent(_btreeCursor.get(), &details);
@@ -111,25 +105,26 @@ namespace mongo {
             // query fields.
             for (size_t i = 0; i < _fields.size(); ++i) {
                 BSONElementSet geoFieldElements;
-                indexedObj.getFieldsDotted(_fields[i].field, geoFieldElements);
+                indexedObj.getFieldsDotted(_fields[i].field, geoFieldElements, false);
                 if (geoFieldElements.empty()) { continue; }
 
                 bool match = false;
 
                 for (BSONElementSet::iterator oi = geoFieldElements.begin();
                      oi != geoFieldElements.end(); ++oi) {
+                    if (!oi->isABSONObj()) { continue; }
                     const BSONObj &geoObj = oi->Obj();
-                    if (GeoJSONParser::isPolygon(geoObj)) {
+                    if (GeoParser::isPolygon(geoObj)) {
                         S2Polygon shape;
-                        GeoJSONParser::parsePolygon(geoObj, &shape);
+                        GeoParser::parsePolygon(geoObj, &shape);
                         match = _fields[i].intersectsPolygon(shape);
-                    } else if (GeoJSONParser::isLineString(geoObj)) {
+                    } else if (GeoParser::isLineString(geoObj)) {
                         S2Polyline shape;
-                        GeoJSONParser::parseLineString(geoObj, &shape);
+                        GeoParser::parseLineString(geoObj, &shape);
                         match = _fields[i].intersectsLine(shape);
-                    } else if (GeoJSONParser::isPoint(geoObj)) {
+                    } else if (GeoParser::isPoint(geoObj)) {
                         S2Cell point;
-                        GeoJSONParser::parsePoint(geoObj, &point);
+                        GeoParser::parsePoint(geoObj, &point);
                         match = _fields[i].intersectsPoint(point);
                     }
                     if (match) break;
@@ -141,13 +136,13 @@ namespace mongo {
             if (geoFieldsMatched == _fields.size()) {
                 // We have a winner!  And we point at it.
                 --_numToReturn;
+                ++_nscanned;
                 return true;
             }
         }
         return false;
     }
 
-    // TODO: yielding is very un-tested.
     // This is called when we're supposed to yield.
     void S2Cursor::noteLocation() {
         _btreeCursor->noteLocation();

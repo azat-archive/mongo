@@ -1279,6 +1279,15 @@ namespace spidermonkey {
 
         Scope * createScope();
 
+        virtual Scope* newScope() {
+            Scope* s = createScope();
+            if (!s) return NULL;
+            if (_scopeInitCallback)
+                _scopeInitCallback(*s);
+            installGlobalUtils(*s);
+            return s;
+        }
+
         void runTest();
 
         virtual bool utf8Ok() const { return JS_CStringsAreUTF8(); }
@@ -1604,7 +1613,7 @@ namespace spidermonkey {
             _reportError = reportError;
             JSBool worked = JS_EvaluateScript( _context,
                                                _global,
-                                               code.data(),
+                                               code.rawData(),
                                                code.size(),
                                                name.c_str(),
                                                1,

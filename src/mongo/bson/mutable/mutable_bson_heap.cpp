@@ -17,8 +17,6 @@
 
 #include "mongo/bson/mutable/mutable_bson_heap.h"
 
-#define __TRACE__ __FILE__ << ":" << __FUNCTION__ << " [" << __LINE__ << "]"
-
 namespace mongo {
 namespace mutablebson {
 
@@ -58,7 +56,7 @@ namespace mutablebson {
     uint32_t BasicHeap::putString(const StringData& s) {
         uint32_t index = alloc(s.size() + 1);
         char* buf = deref<char>(index);
-        strcpy(buf, s.data());
+        s.copyTo( buf, true );
         return index;
     }
 
@@ -144,7 +142,7 @@ namespace mutablebson {
     uint32_t BSONObjHeap::putString(const StringData& s) {
         uint32_t offset = alloc(s.size() + 1);
         char* buf = deref<char>(offset);
-        strcpy(buf, s.data());
+        s.copyTo( buf, true );
         return offset;
     }
 

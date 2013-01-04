@@ -19,6 +19,8 @@
 #include "mongo/pch.h"
 
 #include "mongo/bson/util/builder.h"
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/principal_set.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/databaseholder.h"
 #include "mongo/db/introspect.h"
@@ -32,11 +34,39 @@ namespace {
 
 namespace mongo {
 
+namespace {
+    void _appendUserInfo(const Client& c, BSONObjBuilder& builder, AuthorizationManager* authManager) {
+        PrincipalSet::NameIterator nameIter = authManager->getAuthenticatedPrincipalNames();
+
+        PrincipalName bestUser;
+        if (nameIter.more())
+            bestUser = *nameIter;
+
+        StringData opdb( nsToDatabaseSubstring( c.ns() ) );
+
+        BSONArrayBuilder allUsers(builder.subarrayStart("allUsers"));
+        for ( ; nameIter.more(); nameIter.next()) {
+            BSONObjBuilder nextUser(allUsers.subobjStart());
+            nextUser.append(AuthorizationManager::USER_NAME_FIELD_NAME, nameIter->getUser());
+            nextUser.append(AuthorizationManager::USER_SOURCE_FIELD_NAME, nameIter->getDB());
+            nextUser.doneFast();
+
+            if (nameIter->getDB() == opdb) {
+                bestUser = *nameIter;
+            }
+        }
+        allUsers.doneFast();
+
+        builder.append("user", bestUser.getUser().empty() ? "" : bestUser.getFullName());
+
+    }
+} // namespace
+
     static void _profile(const Client& c, CurOp& currentOp, BufBuilder& profileBufBuilder) {
         Database *db = c.database();
         DEV verify( db );
         const char *ns = db->profileName.c_str();
-        
+
         // build object
         BSONObjBuilder b(profileBufBuilder);
 
@@ -46,9 +76,8 @@ namespace mongo {
         b.appendDate("ts", jsTime());
         b.append("client", c.clientAddress());
 
-        if (c.getAuthenticationInfo()) {
-            b.append("user", c.getAuthenticationInfo()->getUser(nsToDatabase(ns)));
-        }
+        AuthorizationManager* authManager = c.getAuthorizationManager();
+        _appendUserInfo(c, b, authManager);
 
         BSONObj p = b.done();
 
@@ -61,8 +90,7 @@ namespace mongo {
             BSONObjBuilder b(profileBufBuilder);
             b.appendDate("ts", jsTime());
             b.append("client", c.clientAddress() );
-            if ( c.getAuthenticationInfo() )
-                b.append( "user" , c.getAuthenticationInfo()->getUser( nsToDatabase( ns ) ) );
+            _appendUserInfo(c, b, authManager);
 
             b.append("err", "profile line too large (max is 100KB)");
 
@@ -92,7 +120,7 @@ namespace mongo {
         try {
             Lock::DBWrite lk( currentOp.getNS() );
             if ( dbHolder()._isLoaded( nsToDatabase( currentOp.getNS() ) , dbpath ) ) {
-                Client::Context cx( currentOp.getNS(), dbpath, false );
+                Client::Context cx(currentOp.getNS(), dbpath);
                 _profile(c, currentOp, profileBufBuilder);
             }
             else {
@@ -107,21 +135,32 @@ namespace mongo {
         }
     }
 
-    NamespaceDetails* getOrCreateProfileCollection(Database *db, bool force) {
+    NamespaceDetails* getOrCreateProfileCollection(Database *db, bool force, string* errmsg ) {
         fassert(16372, db);
         const char* profileName = db->profileName.c_str();
         NamespaceDetails* details = db->namespaceIndex.details(profileName);
         if (!details && (cmdLine.defaultProfile || force)) {
             // system.profile namespace doesn't exist; create it
             log() << "creating profile collection: " << profileName << endl;
-            string errmsg;
+            string myerrmsg;
             if (!userCreateNS(db->profileName.c_str(),
-                              BSON("capped" << true << "size" << 1024 * 1024), errmsg , false)) {
-                log() << "could not create ns " << db->profileName << ": " << errmsg << endl;
+                              BSON("capped" << true << "size" << 1024 * 1024), myerrmsg , false)) {
+                myerrmsg = str::stream() << "could not create ns " << db->profileName << ": " << myerrmsg;
+                log() << myerrmsg << endl;
+                if ( errmsg )
+                    *errmsg = myerrmsg;
                 return NULL;
             }
             details = db->namespaceIndex.details(profileName);
         }
+        else if ( details && !details->isCapped() ) {
+            string myerrmsg = str::stream() << profileName << " exists but isn't capped";
+            log() << myerrmsg << endl;
+            if ( errmsg )
+                *errmsg = myerrmsg;
+            return NULL;
+        }
+
         if (!details) {
             // failed to get or create profile collection
             static time_t last = time(0) - 10;  // warn the first time

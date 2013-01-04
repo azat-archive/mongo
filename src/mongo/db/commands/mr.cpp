@@ -17,21 +17,23 @@
  */
 
 #include "pch.h"
-#include "../db.h"
-#include "../instance.h"
-#include "../commands.h"
-#include "../../scripting/engine.h"
-#include "../../client/connpool.h"
-#include "../../client/parallel.h"
-#include "../matcher.h"
-#include "../clientcursor.h"
-#include "../replutil.h"
-#include "../../s/d_chunk_manager.h"
-#include "../../s/d_logic.h"
-#include "../../s/grid.h"
-#include "mongo/db/kill_current_op.h"
 
 #include "mr.h"
+
+#include "mongo/client/connpool.h"
+#include "mongo/client/parallel.h"
+#include "mongo/db/clientcursor.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/db.h"
+#include "mongo/db/instance.h"
+#include "mongo/db/kill_current_op.h"
+#include "mongo/db/matcher.h"
+#include "mongo/db/replutil.h"
+#include "mongo/scripting/engine.h"
+#include "mongo/s/d_chunk_manager.h"
+#include "mongo/s/d_logic.h"
+#include "mongo/s/grid.h"
+#include "mongo/s/stale_exception.h"
 
 namespace mongo {
 
@@ -214,66 +216,6 @@ namespace mongo {
             s->append( temp , "1" , "return" );
             x.push_back( temp.obj() );
             _reduce( x , key , endSizeEstimate );
-        }
-
-        Config::OutputOptions Config::parseOutputOptions(const string& dbname,
-                                                         const BSONObj& cmdObj) {
-            Config::OutputOptions outputOptions;
-
-            outputOptions.outNonAtomic = false;
-            if ( cmdObj["out"].type() == String ) {
-                outputOptions.collectionName = cmdObj["out"].String();
-                outputOptions.outType = REPLACE;
-            }
-            else if ( cmdObj["out"].type() == Object ) {
-                BSONObj o = cmdObj["out"].embeddedObject();
-
-                BSONElement e = o.firstElement();
-                string t = e.fieldName();
-
-                if ( t == "normal" || t == "replace" ) {
-                    outputOptions.outType = REPLACE;
-                    outputOptions.collectionName = e.String();
-                }
-                else if ( t == "merge" ) {
-                    outputOptions.outType = MERGE;
-                    outputOptions.collectionName = e.String();
-                }
-                else if ( t == "reduce" ) {
-                    outputOptions.outType = REDUCE;
-                    outputOptions.collectionName = e.String();
-                }
-                else if ( t == "inline" ) {
-                    outputOptions.outType = INMEMORY;
-                }
-                else {
-                    uasserted( 13522 , str::stream() << "unknown out specifier [" << t << "]" );
-                }
-
-                if (o.hasElement("db")) {
-                    outputOptions.outDB = o["db"].String();
-                }
-
-                if (o.hasElement("nonAtomic")) {
-                    outputOptions.outNonAtomic = o["nonAtomic"].Bool();
-                    if (outputOptions.outNonAtomic)
-                        uassert(15895,
-                                "nonAtomic option cannot be used with this output type",
-                                (outputOptions.outType == REDUCE ||
-                                        outputOptions.outType == MERGE));
-                }
-            }
-            else {
-                uasserted( 13606 , "'out' has to be a string or an object" );
-            }
-
-            if ( outputOptions.outType != INMEMORY ) {
-                outputOptions.finalNamespace = str::stream() <<
-                        (outputOptions.outDB.empty() ? dbname : outputOptions.outDB) <<
-                        "." << outputOptions.collectionName;
-            }
-
-            return outputOptions;
         }
 
         Config::Config( const string& _dbname , const BSONObj& cmdObj )
@@ -543,6 +485,7 @@ namespace mongo {
             else if ( _config.outputOptions.outType == Config::MERGE ) {
                 // merge: upsert new docs into old collection
                 op->setMessage("m/r: merge post processing",
+                               "M/R Merge Post Processing Progress",
                                _safeCount(_db, _config.tempNamespace, BSONObj()));
                 auto_ptr<DBClientCursor> cursor = _db.query( _config.tempNamespace , BSONObj() );
                 while ( cursor->more() ) {
@@ -560,6 +503,7 @@ namespace mongo {
                 BSONList values;
 
                 op->setMessage("m/r: reduce post processing",
+                               "M/R Reduce Post Processing Progress",
                                _safeCount(_db, _config.tempNamespace, BSONObj()));
                 auto_ptr<DBClientCursor> cursor = _db.query( _config.tempNamespace , BSONObj() );
                 while ( cursor->more() ) {
@@ -804,7 +748,9 @@ namespace mongo {
             BSONObj prev;
             BSONList all;
 
-            verify( pm == op->setMessage( "m/r: (3/3) final reduce to collection" , _safeCount( _db, _config.incLong, BSONObj(), QueryOption_SlaveOk ) ) );
+            verify(pm == op->setMessage("m/r: (3/3) final reduce to collection",
+                                        "M/R Final Reduce Progress",
+                                        _db.count(_config.incLong, BSONObj(), QueryOption_SlaveOk)));
 
             shared_ptr<Cursor> temp =
             NamespaceDetailsTransient::bestGuessCursor( _config.incLong.c_str() , BSONObj() ,
@@ -1052,6 +998,12 @@ namespace mongo {
 
             virtual LockType locktype() const { return NONE; }
 
+            virtual void addRequiredPrivileges(const std::string& dbname,
+                                               const BSONObj& cmdObj,
+                                               std::vector<Privilege>* out) {
+                addPrivilegesRequiredForMapReduce(dbname, cmdObj, out);
+            }
+
             bool run(const string& dbname , BSONObj& cmd, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
                 Timer t;
                 Client& client = cc();
@@ -1106,15 +1058,12 @@ namespace mongo {
                     }
                 }
 
-                if (state.isOnDisk() && !client.getAuthenticationInfo()->isAuthorized(dbname)) {
-                    errmsg = "read-only user cannot output mapReduce to collection, use inline instead";
-                    return false;
-                }
-
                 try {
                     state.init();
                     state.prepTempCollection();
-                    ProgressMeterHolder pm( op->setMessage( "m/r: (1/3) emit phase" , state.incomingDocuments() ) );
+                    ProgressMeterHolder pm(op->setMessage("m/r: (1/3) emit phase",
+                                                          "M/R: Emit Progress",
+                                                          state.incomingDocuments()));
 
                     wassert( config.limit < 0x4000000 ); // see case on next line to 32 bit unsigned
                     long long mapTime = 0;
@@ -1125,7 +1074,7 @@ namespace mongo {
                         Lock::DBRead lock( config.ns );
                         // This context does no version check, safe b/c we checked earlier and have an
                         // open cursor
-                        Client::Context ctx( config.ns, dbpath, true, false );
+                        Client::Context ctx(config.ns, dbpath, false);
 
                         // obtain full cursor on data to apply mr to
                         shared_ptr<Cursor> temp = NamespaceDetailsTransient::getCursor( config.ns.c_str(), config.filter, config.sort );
@@ -1195,7 +1144,8 @@ namespace mongo {
                     timingBuilder.appendNumber( "mapTime" , mapTime / 1000 );
                     timingBuilder.append( "emitLoop" , t.millis() );
 
-                    op->setMessage( "m/r: (2/3) final reduce in memory" );
+                    op->setMessage("m/r: (2/3) final reduce in memory",
+                                   "M/R Final In-Memory Reduce Progress");
                     Timer rt;
                     // do reduce in memory
                     // this will be the last reduce needed for inline mode
@@ -1257,6 +1207,13 @@ namespace mongo {
             virtual bool slaveOk() const { return !replSet; }
             virtual bool slaveOverrideOk() const { return true; }
             virtual LockType locktype() const { return NONE; }
+            virtual void addRequiredPrivileges(const std::string& dbname,
+                                               const BSONObj& cmdObj,
+                                               std::vector<Privilege>* out) {
+                ActionSet actions;
+                actions.addAction(ActionType::mapReduceShardedFinish);
+                out->push_back(Privilege(dbname, actions));
+            }
             bool run(const string& dbname , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
                 ShardedConnectionInfo::addHook();
                 // legacy name
@@ -1283,7 +1240,8 @@ namespace mongo {
                 BSONObj shardCounts = cmdObj["shardCounts"].embeddedObjectUserCheck();
                 BSONObj counts = cmdObj["counts"].embeddedObjectUserCheck();
 
-                ProgressMeterHolder pm( op->setMessage( "m/r: merge sort and reduce" ) );
+                ProgressMeterHolder pm(op->setMessage("m/r: merge sort and reduce",
+                                                      "M/R Merge Sort and Reduce Progress"));
                 set<ServerAndQuery> servers;
                 vector< auto_ptr<DBClientCursor> > shardCursors;
 

@@ -17,41 +17,43 @@
 #include "mongo/db/auth/auth_external_state_server_common.h"
 
 #include "mongo/base/status.h"
-#include "mongo/client/dbclientinterface.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/client.h"
+#include "mongo/db/server_parameters.h"
 #include "mongo/util/debug_util.h"
 
 namespace mongo {
 
-    AuthExternalStateServerCommon::AuthExternalStateServerCommon() {}
+namespace {
+    MONGO_EXPORT_SERVER_PARAMETER(enableLocalhostAuthBypass, bool, true);
+} // namespace
+
+    // NOTE: we default _allowLocalhost to true under the assumption that _checkShouldAllowLocalhost
+    // will always be called before any calls to shouldIgnoreAuthChecks.  If this is not the case,
+    // it could cause a security hole.
+    AuthExternalStateServerCommon::AuthExternalStateServerCommon() : _allowLocalhost(true) {}
     AuthExternalStateServerCommon::~AuthExternalStateServerCommon() {}
 
-    Status AuthExternalStateServerCommon::initialize(DBClientBase* adminDBConnection) {
-        if (noauth) {
-            return Status::OK();
-        }
+    void AuthExternalStateServerCommon::_checkShouldAllowLocalhost() {
+        if (noauth)
+            return;
+        // If we know that an admin user exists, don't re-check.
+        if (!_allowLocalhost)
+            return;
 
-        try {
-            _adminUserExists = AuthorizationManager::hasPrivilegeDocument(adminDBConnection,
-                                                                          "admin");
-        } catch (DBException& e) {
-            return Status(ErrorCodes::InternalError,
-                          mongoutils::str::stream() << "An error occurred while checking for the "
-                                  "existence of an admin user: " << e.what(),
-                          0);
-        }
-        ONCE {
-            if (!_adminUserExists) {
-                log() << "note: no users configured in admin.system.users, allowing localhost access"
-                      << endl;
+        _allowLocalhost = !_hasPrivilegeDocument("admin");
+        if (_allowLocalhost) {
+            ONCE {
+                log() << "note: no users configured in admin.system.users, allowing localhost "
+                        "access" << std::endl;
             }
         }
-        return Status::OK();
     }
 
     bool AuthExternalStateServerCommon::shouldIgnoreAuthChecks() const {
-        return noauth || (!_adminUserExists && cc().getIsLocalHostConnection()) || cc().isGod();
+        ClientBasic* client = ClientBasic::getCurrent();
+        return noauth ||
+                (enableLocalhostAuthBypass &&client->getIsLocalHostConnection() && _allowLocalhost);
     }
 
 } // namespace mongo

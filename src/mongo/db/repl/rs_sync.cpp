@@ -77,7 +77,7 @@ namespace replset {
             lk.reset(new Lock::DBWrite(ns)); 
         }
 
-        Client::Context ctx(ns, dbpath, false);
+        Client::Context ctx(ns, dbpath);
         ctx.getClient()->curop()->reset();
         // For non-initial-sync, we convert updates to upserts
         // to suppress errors when replaying oplog entries.
@@ -356,6 +356,7 @@ namespace replset {
                    (ops.getSize() < replBatchLimitBytes)) {
 
                 if (theReplSet->isPrimary()) {
+                    massert(16620, "there are ops to sync, but I'm primary", ops.empty());
                     return;
                 }
 
@@ -388,6 +389,7 @@ namespace replset {
                         // When would mgr be null?  During replsettest'ing.
                         if (mgr) mgr->send(boost::bind(&Manager::msgCheckNewState, theReplSet->mgr));
                         sleepsecs(1);
+                        // There should never be ops to sync in a 1-member set, anyway
                         return;
                     }
                 }
@@ -567,21 +569,15 @@ namespace replset {
             }
         }
 
-        {
-            Lock::DBRead lk("local.replset.minvalid");
-            BSONObj mv;
-            if( Helpers::getSingleton("local.replset.minvalid", mv) ) {
-                minvalid = mv["ts"]._opTime();
-                if( minvalid <= lastOpTimeWritten ) {
-                    golive=true;
-                }
-                else {
-                    sethbmsg(str::stream() << "still syncing, not yet to minValid optime " << minvalid.toString());
-                }
-            }
-            else
-                golive = true; /* must have been the original member */
+        minvalid = getMinValid();
+        if( minvalid <= lastOpTimeWritten ) {
+            golive=true;
         }
+        else {
+            sethbmsg(str::stream() << "still syncing, not yet to minValid optime " <<
+                     minvalid.toString());
+        }
+
         if( golive ) {
             sethbmsg("");
             changeState(MemberState::RS_SECONDARY);
@@ -664,6 +660,16 @@ namespace replset {
         return _forceSyncTarget != 0;
     }
 
+    bool ReplSetImpl::shouldChangeSyncTarget(const OpTime& targetOpTime) const {
+        for (Member *m = _members.head(); m; m = m->next()) {
+            if (m->syncable() && targetOpTime.getSecs()+30 < m->hbinfo().opTime.getSecs()) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     void ReplSetImpl::_syncThread() {
         StateBox::SP sp = box.get();
         if( sp.state.primary() ) {
@@ -676,7 +682,7 @@ namespace replset {
         }
 
         /* do we have anything at all? */
-        if( lastOpTimeWritten.isNull() ) {
+        if (getMinValid().isNull() || lastOpTimeWritten.isNull()) {
             syncDoInitialSync();
             return; // _syncThread will be recalled, starts from top again in case sync failed.
         }

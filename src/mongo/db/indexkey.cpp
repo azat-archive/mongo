@@ -23,6 +23,7 @@
 #include "../util/stringutils.h"
 #include "mongo/util/mongoutils/str.h"
 #include "../util/text.h"
+#include "mongo/db/queryutil.h"
 
 namespace mongo {
 
@@ -128,6 +129,17 @@ namespace mongo {
         }
 
         _finishedInit = true;
+    }
+
+    string IndexSpec::toString() const {
+        stringstream s;
+        s << "IndexSpec @ " << hex << this << dec << ", "
+          << "Details @ " << hex << _details << dec << ", "
+          << "Type: " << getTypeName() << ", "
+          << "nFields: " << _nFields << ", "
+          << "KeyPattern: " << keyPattern << ", "
+          << "Info: " << info;
+        return s.str();
     }
 
     void assertParallelArrays( const char *first, const char *second ) {
@@ -421,37 +433,39 @@ namespace mongo {
         }
     }
 
-    bool anyElementNamesMatch( const BSONObj& a , const BSONObj& b ) {
-        BSONObjIterator x(a);
-        while ( x.more() ) {
-            BSONElement e = x.next();
-            BSONObjIterator y(b);
-            while ( y.more() ) {
-                BSONElement f = y.next();
-                FieldCompareResult res = compareDottedFieldNames( e.fieldName() , f.fieldName() ,
-                                                                 LexNumCmp( true ) );
-                if ( res == SAME || res == LEFT_SUBFIELD || res == RIGHT_SUBFIELD )
-                    return true;
-            }
-        }
-        return false;
-    }
 
-    IndexSuitability IndexSpec::suitability( const BSONObj& query , const BSONObj& order ) const {
+    IndexSuitability IndexSpec::suitability( const FieldRangeSet& queryConstraints ,
+                                             const BSONObj& order ) const {
         if ( _indexType.get() )
-            return _indexType->suitability( query , order );
-        return _suitability( query , order );
+            return _indexType->suitability( queryConstraints , order );
+        return _suitability( queryConstraints , order );
     }
 
-    IndexSuitability IndexSpec::_suitability( const BSONObj& query , const BSONObj& order ) const {
-        // TODO: optimize
-        if ( anyElementNamesMatch( keyPattern , query ) == 0 && anyElementNamesMatch( keyPattern , order ) == 0 )
-            return USELESS;
-        return HELPFUL;
+    IndexSuitability IndexSpec::_suitability( const FieldRangeSet& queryConstraints ,
+                                              const BSONObj& order ) const {
+        // This is a quick first pass to determine the suitability of the index.  It produces some
+        // false positives (returns HELPFUL for some indexes which are not particularly). When we
+        // return HELPFUL a more precise determination of utility is done by the query optimizer.
+
+        // check whether any field in the index is constrained at all by the query
+        BSONForEach( elt, keyPattern ){
+            const FieldRange& frange = queryConstraints.range( elt.fieldName() );
+            if( ! frange.universal() )
+                return HELPFUL;
+        }
+        // or whether any field in the desired sort order is in the index
+        set<string> orderFields;
+        order.getFieldNames( orderFields );
+        BSONForEach( k, keyPattern ) {
+            if ( orderFields.find( k.fieldName() ) != orderFields.end() )
+                return HELPFUL;
+        }
+        return USELESS;
     }
 
-    IndexSuitability IndexType::suitability( const BSONObj& query , const BSONObj& order ) const {
-        return _spec->_suitability( query , order );
+    IndexSuitability IndexType::suitability( const FieldRangeSet& queryConstraints ,
+                                             const BSONObj& order ) const {
+        return _spec->_suitability( queryConstraints , order );
     }
     
     int IndexSpec::indexVersion() const {

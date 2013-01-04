@@ -17,14 +17,17 @@
 */
 
 #include "pch.h"
-#include "../server.h"
-#include "shard.h"
-#include "config.h"
-#include "request.h"
-#include "mongo/db/client.h"
-#include "mongo/db/security.h"
-#include "mongo/util/stacktrace.h"
+
 #include <set>
+
+#include "mongo/db/client.h"
+#include "mongo/s/config.h"
+#include "mongo/s/request.h"
+#include "mongo/s/shard.h"
+#include "mongo/s/stale_exception.h"
+#include "mongo/s/version_manager.h"
+#include "mongo/server.h"
+#include "mongo/util/stacktrace.h"
 
 namespace mongo {
 
@@ -82,10 +85,6 @@ namespace mongo {
             } else {
                 s->created++;
                 c.reset( shardConnectionPool.get( addr ) );
-            }
-            if ( !noauth ) {
-                c->setAuthenticationTable( ClientBasic::getCurrent()->getAuthenticationInfo()->
-                                           getAuthTable() );
             }
             return c.release();
         }
@@ -171,7 +170,6 @@ namespace mongo {
         }
 
         void release( const string& addr , DBClientBase * conn ) {
-            conn->clearAuthenticationTable();
             shardConnectionPool.release( addr , conn );
         }
 
@@ -230,10 +228,13 @@ namespace mongo {
         _init();
     }
 
+    void usingAShardConnection( const string& addr );
+
     void ShardConnection::_init() {
         verify( _addr.size() );
         _conn = ClientConnections::threadInstance()->get( _addr , _ns );
         _finishedInit = false;
+        usingAShardConnection( _addr );
     }
 
     void ShardConnection::_finishInit() {
@@ -265,7 +266,15 @@ namespace mongo {
     void ShardConnection::kill() {
         if ( _conn ) {
             if( versionManager.isVersionableCB( _conn ) ) versionManager.resetShardVersionCB( _conn );
-            delete _conn;
+
+            if (_conn->isFailed()) {
+                // Let the pool know about the bad connection and also delegate disposal to it.
+                ClientConnections::threadInstance()->done(_addr, _conn);
+            }
+            else {
+                delete _conn;
+            }
+
             _conn = 0;
             _finishedInit = true;
         }

@@ -45,7 +45,6 @@
 #include "pdfile.h"
 #include "db.h"
 #include "commands.h"
-#include "security.h"
 #include "cmdline.h"
 #include "repl_block.h"
 #include "repl/rs.h"
@@ -160,7 +159,7 @@ namespace mongo {
 
     bool replAuthenticate(DBClientBase *conn);
 
-    void appendReplicationInfo( BSONObjBuilder& result , bool userIsAdmin , int level ) {
+    void appendReplicationInfo(BSONObjBuilder& result, int level) {
         if ( replSet ) {
             if( theReplSet == 0 || theReplSet->state().shunned() ) {
                 result.append("ismaster", false);
@@ -192,7 +191,7 @@ namespace mongo {
             int n = 0;
             list<BSONObj> src;
             {
-                Client::ReadContext ctx( "local.sources", dbpath, userIsAdmin );
+                Client::ReadContext ctx("local.sources", dbpath);
                 shared_ptr<Cursor> c = findTableScan("local.sources", BSONObj());
                 while ( c->ok() ) {
                     src.push_back(c->current());
@@ -245,16 +244,15 @@ namespace mongo {
     public:
         ReplicationInfoServerStatus() : ServerStatusSection( "repl" ){}
         bool includeByDefault() const { return true; }
-        bool adminOnly() const { return false; }
         
-        BSONObj generateSection( const BSONElement& configElement, bool userIsAdmin ) const {
+        BSONObj generateSection(const BSONElement& configElement) const {
             if ( ! anyReplEnabled() )
                 return BSONObj();
             
             int level = configElement.numberInt();
             
             BSONObjBuilder result;
-            appendReplicationInfo( result, userIsAdmin, level );
+            appendReplicationInfo(result, level);
             return result.obj();
         }
     } replicationInfoServerStatus;
@@ -278,13 +276,11 @@ namespace mongo {
         virtual bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool /*fromRepl*/) {
             /* currently request to arbiter is (somewhat arbitrarily) an ismaster request that is not
                authenticated.
-               we allow unauthenticated ismaster but we aren't as verbose informationally if
-               one is not authenticated for admin db to be safe.
             */
-            bool authed = cc().getAuthenticationInfo()->isAuthorizedReads("admin");
-            appendReplicationInfo( result , authed , 0 );
+            appendReplicationInfo(result, 0);
 
             result.appendNumber("maxBsonObjectSize", BSONObjMaxUserSize);
+            result.appendNumber("maxMessageSizeBytes", MaxMessageSizeBytes);
             result.appendDate("localTime", jsTime());
             return true;
         }
@@ -535,7 +531,7 @@ namespace mongo {
             ReplInfo r("resync: cloning a database");
             string errmsg;
             int errCode = 0;
-            bool ok = cloneFrom(hostName.c_str(), errmsg, cc().database()->name, false, /*slaveOk*/ true, /*replauth*/ true, /*snapshot*/false, /*mayYield*/true, /*mayBeInterrupted*/false, &errCode);
+            bool ok = Cloner::cloneFrom(hostName.c_str(), errmsg, cc().database()->name, false, /*slaveOk*/ true, /*replauth*/ true, /*snapshot*/false, /*mayYield*/true, /*mayBeInterrupted*/false, &errCode);
             if ( !ok ) {
                 if ( errCode == DatabaseDifferCaseCode ) {
                     resyncDrop( db.c_str(), "internal" );
@@ -828,8 +824,8 @@ namespace mongo {
 
         int get() const { return _value; }
 
-        virtual void append( BSONObjBuilder& b ) {
-            b.append( name(), _value );
+        virtual void append( BSONObjBuilder& b, const string& name ) {
+            b.append( name, _value );
         }
 
         virtual Status set( const BSONElement& newValuElement ) {
@@ -1130,8 +1126,8 @@ namespace mongo {
         if( noauth ) {
             return true;
         }
-        if( ! cc().isAdmin() ) {
-            log() << "replauthenticate: requires admin permissions, failing" << endl;
+        if (!cc().getAuthorizationManager()->hasInternalAuthorization()) {
+            log() << "replauthenticate: requires internal authorization, failing" << endl;
             return false;
         }
 
@@ -1163,10 +1159,7 @@ namespace mongo {
             log() << "replauthenticate: can't authenticate to master server, user:" << u << endl;
             return false;
         }
-        if ( internalSecurity.pwd.length() > 0 ) {
-            conn->setAuthenticationTable(
-                    AuthenticationTable::getInternalSecurityAuthenticationTable() );
-        }
+
         return true;
     }
 
@@ -1219,7 +1212,9 @@ namespace mongo {
 
     bool OplogReader::commonConnect(const string& hostName) {
         if( conn() == 0 ) {
-            _conn = shared_ptr<DBClientConnection>(new DBClientConnection( false, 0, 60*10 /* tcp timeout */));
+            _conn = shared_ptr<DBClientConnection>(new DBClientConnection(false,
+                                                                          0,
+                                                                          30 /* tcp timeout */));
             string errmsg;
             ReplInfo r("trying to connect to sync source");
             if ( !_conn->connect(hostName.c_str(), errmsg) ||

@@ -70,7 +70,8 @@ printjson( result2 );
 assert.eq( 1, result2.ok , "splitting didn't succeed");
 
 //test moving
-var result3 = admin.runCommand( { movechunk : coll.getFullName() , find : { num : 20 } , to : s.getOther( s.getServer( "test" ) ).name } );
+var result3 = admin.runCommand({ movechunk: coll.getFullName(), find: { num: 20 },
+    to: s.getOther(s.getServer("test")).name, _waitForDelete: true });
 printjson( result3 );
 assert.eq( 1, result3.ok , "moveChunk didn't succeed");
 
@@ -87,7 +88,8 @@ assert.neq( null, err, "Inserting document with array value for shard key succee
 // shard key) makes that index unusable for migrations.  Test that removing the multi-key value and
 // rebuilding the index allows it to be used again
 coll.save({ num : 100, x : [1,2]});
-var result4 = admin.runCommand( { movechunk : coll.getFullName() , find : { num : 70 } , to : s.getOther( s.getServer( "test" ) ).name } );
+var result4 = admin.runCommand({ movechunk: coll.getFullName(), find: { num: 70 },
+    to: s.getOther(s.getServer("test")).name, _waitForDelete: true });
 printjson( result4 );
 assert.eq( 0, result4.ok , "moveChunk succeeded without a usable index");
 
@@ -95,7 +97,8 @@ coll.remove({ num : 100 });
 db.getLastError();
 coll.reIndex();
 db.getLastError();
-var result4 = admin.runCommand( { movechunk : coll.getFullName() , find : { num : 70 } , to : s.getOther( s.getServer( "test" ) ).name } );
+result4 = admin.runCommand({ movechunk: coll.getFullName(), find : { num : 70 },
+    to: s.getOther(s.getServer("test")).name, _waitForDelete: true });
 printjson( result4 );
 assert.eq( 1, result4.ok , "moveChunk failed after rebuilding index");
 
@@ -148,7 +151,8 @@ for( i=0; i < 3; i++ ){
     assert.eq( config.chunks.find( { ns : coll2.getFullName() } ).count() , 2 );
 
     // movechunk should move ALL docs since they have same value for skey
-    var moveRes = admin.runCommand( { moveChunk : coll2 + "", find : { skey : 0 }, to : shards[1]._id } );
+    moveRes = admin.runCommand({ moveChunk: coll2 + "", find: { skey: 0 },
+        to: shards[1]._id, _waitForDelete: true });
     assert.eq( moveRes.ok , 1 , "movechunk didn't work" );
 
     // Make sure our migration eventually goes through before testing individual shards

@@ -43,11 +43,12 @@ namespace mongo {
     const int PDFILE_VERSION = 4;
     const int PDFILE_VERSION_MINOR = 5;
 
+    class Cursor;
     class DataFileHeader;
     class Extent;
-    class Record;
-    class Cursor;
     class OpDebug;
+    class Record;
+    struct SortPhaseOne;
 
     void dropDatabase(const std::string& db);
     bool repairDatabase(string db, string &errmsg, bool preserveClonedFilesOnFailure = false, bool backupOriginalFiles = false);
@@ -115,6 +116,7 @@ namespace mongo {
     class DataFileMgr {
         friend class BasicCursor;
     public:
+        DataFileMgr();
         void init(const string& path );
 
         /* see if we can find an extent of the right size in the freelist. */
@@ -135,6 +137,7 @@ namespace mongo {
         /**
          * insert() will add an _id to the object if not present.  If you would like to see the
          * final object after such an addition, use this method.
+         * note: does NOT put on oplog
          * @param o both and in and out param
          * @param mayInterrupt When true, killop may interrupt the function call.
          */
@@ -143,11 +146,9 @@ namespace mongo {
                                  bool mayInterrupt = false,
                                  bool god = false);
 
-        /** @param obj in value only for this version. */
-        void insertNoReturnVal(const char *ns, BSONObj o, bool god = false);
-
         /**
          * Insert the contents of @param buf with length @param len into namespace @param ns.
+         * note: does NOT put on oplog
          * @param mayInterrupt When true, killop may interrupt the function call.
          * @param god if true, you may pass in obuf of NULL and then populate the returned DiskLoc
          *     after the call -- that will prevent a double buffer copy in some cases (btree.cpp).
@@ -163,7 +164,7 @@ namespace mongo {
                        bool god = false,
                        bool mayAddIndex = true,
                        bool* addedID = 0);
-        static shared_ptr<Cursor> findAll(const char *ns, const DiskLoc &startLoc = DiskLoc());
+        static shared_ptr<Cursor> findAll(const StringData& ns, const DiskLoc &startLoc = DiskLoc());
 
         /* special version of insert for transaction logging -- streamlined a bit.
            assumes ns is capped and no indexes
@@ -182,8 +183,21 @@ namespace mongo {
         /* does not clean up indexes, etc. : just deletes the record in the pdfile. use deleteRecord() to unindex */
         void _deleteRecord(NamespaceDetails *d, const char *ns, Record *todelete, const DiskLoc& dl);
 
+        /**
+         * accessor/mutator for the 'precalced' keys (that is, sorted index keys)
+         *
+         * NB: 'precalced' is accessed from fastBuildIndex(), which is called from insert-related
+         * methods like insertWithObjMod().  It is mutated from various callers of the insert
+         * methods, which assume 'precalced' will not change while in the insert method.  This
+         * should likely be refactored so theDataFileMgr takes full responsibility.
+         */
+        SortPhaseOne* getPrecalced() const;
+        void setPrecalced(SortPhaseOne* precalced);
+        mongo::mutex _precalcedMutex;
+
     private:
         vector<MongoDataFile *> files;
+        SortPhaseOne* _precalced;
     };
 
     extern DataFileMgr theDataFileMgr;
@@ -543,14 +557,34 @@ namespace mongo {
         }
         return e->firstRecord;
     }
+
     inline DiskLoc Record::getPrev(const DiskLoc& myLoc) {
         _accessing();
-        if ( _prevOfs != DiskLoc::NullOfs )
+
+        // Check if we still have records on our current extent
+        if ( _prevOfs != DiskLoc::NullOfs ) {
             return DiskLoc(myLoc.a(), _prevOfs);
+        }
+
+        // Get the current extent
         Extent *e = myExtent(myLoc);
-        if ( e->xprev.isNull() )
-            return DiskLoc();
-        return e->xprev.ext()->lastRecord;
+        while ( 1 ) {
+            if ( e->xprev.isNull() ) {
+                // There are no more extents before this one
+                return DiskLoc();
+            }
+
+            // Move to the extent before this one
+            e = e->xprev.ext();
+
+            if ( !e->lastRecord.isNull() ) {
+                // We have found a non empty extent
+                break;
+            }
+        }
+
+        // Return the last record in our new extent
+        return e->lastRecord;
     }
 
     inline BSONObj DiskLoc::obj() const {
@@ -584,24 +618,23 @@ namespace mongo {
 
     boost::intmax_t dbSize( const char *database );
 
-    inline NamespaceIndex* nsindex(const char *ns) {
+    inline NamespaceIndex* nsindex(const StringData& ns) {
         Database *database = cc().database();
         verify( database );
         memconcept::is(database, memconcept::concept::database, ns, sizeof(Database));
         DEV {
-            char buf[256];
-            nsToDatabase(ns, buf);
-            if ( database->name != buf ) {
+            StringData dbname = nsToDatabaseSubstring( ns );
+            if ( database->name != dbname ) {
                 out() << "ERROR: attempt to write to wrong database\n";
                 out() << " ns:" << ns << '\n';
                 out() << " database->name:" << database->name << endl;
-                verify( database->name == buf );
+                verify( database->name == dbname );
             }
         }
         return &database->namespaceIndex;
     }
 
-    inline NamespaceDetails* nsdetails(const char *ns) {
+    inline NamespaceDetails* nsdetails(const StringData& ns) {
         // if this faults, did you set the current db first?  (Client::Context + dblock)
         NamespaceDetails *d = nsindex(ns)->details(ns);
         if( d ) {
@@ -636,5 +669,23 @@ namespace mongo {
                                        bool god);
 
     void addRecordToRecListInExtent(Record* r, DiskLoc loc);
+
+    /**
+     * Static helpers to manipulate the list of unfinished index builds.
+     */
+    class IndexBuildsInProgress {
+    public:
+        /**
+         * Find an unfinished index build by name.  Does not search finished index builds.
+         */
+        static int get(const char* ns, const std::string& indexName);
+
+        /**
+         * Remove an unfinished index build from the list of index builds and move every subsequent
+         * unfinished index build back one.  E.g., if x, y, z, and w are building and someone kills
+         * y, this method would rearrange the list to be x, z, w, (empty), etc.
+         */
+        static void remove(const char* ns, int offset);
+    };
 
 } // namespace mongo

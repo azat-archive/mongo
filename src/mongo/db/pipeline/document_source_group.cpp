@@ -52,11 +52,10 @@ namespace mongo {
 
         ++groupsIterator;
         if (groupsIterator == groups.end()) {
-            pCurrent.reset();
+            dispose();
             return false;
         }
 
-        pCurrent = makeDocument(groupsIterator);
         return true;
     }
 
@@ -64,7 +63,14 @@ namespace mongo {
         if (!populated)
             populate();
 
-        return pCurrent;
+        return makeDocument(groupsIterator);
+    }
+
+    void DocumentSourceGroup::dispose() {
+        GroupsType().swap(groups);
+        groupsIterator = groups.end();
+
+        pSource->dispose();
     }
 
     void DocumentSourceGroup::sourceToBson(
@@ -194,47 +200,17 @@ namespace mongo {
                 else if (groupType == String) {
                     string groupString(groupField.str());
                     const char *pGroupString = groupString.c_str();
-                    if ((groupString.length() == 0) ||
-                        (pGroupString[0] != '$'))
-                        goto StringConstantId;
-
-                    string pathString(
-                        Expression::removeFieldPrefix(groupString));
-                    intrusive_ptr<ExpressionFieldPath> pFieldPath(
-                        ExpressionFieldPath::create(pathString));
-                    pGroup->setIdExpression(pFieldPath);
-                    idSet = true;
-                }
-                else {
-                    /* pick out the constant types that are allowed */
-                    switch(groupType) {
-                    case NumberDouble:
-                    case String:
-                    case Object:
-                    case Array:
-                    case jstOID:
-                    case Bool:
-                    case Date:
-                    case NumberInt:
-                    case Timestamp:
-                    case NumberLong:
-                    case jstNULL:
-                    StringConstantId: // from string case above
-                    {
-                        Value pValue(
-                            Value::createFromBsonElement(&groupField));
-                        intrusive_ptr<ExpressionConstant> pConstant(
-                            ExpressionConstant::create(pValue));
-                        pGroup->setIdExpression(pConstant);
+                    if (pGroupString[0] == '$') {
+                        string pathString = Expression::removeFieldPrefix(groupString);
+                        pGroup->setIdExpression(ExpressionFieldPath::create(pathString));
                         idSet = true;
-                        break;
                     }
+                }
 
-                    default:
-                        uassert(15949, str::stream() <<
-                                "a group's _id may not include fields of BSON type " << groupType,
-                                false);
-                    }
+                if (!idSet) {
+                    // constant id - single group
+                    pGroup->setIdExpression(ExpressionConstant::create(Value(groupField)));
+                    idSet = true;
                 }
             }
             else {
@@ -311,59 +287,46 @@ namespace mongo {
     }
 
     void DocumentSourceGroup::populate() {
-        for(bool hasNext = !pSource->eof(); hasNext;
-                hasNext = pSource->advance()) {
-            Document pDocument(pSource->getCurrent());
+        const size_t numAccumulators = vpAccumulatorFactory.size();
+        dassert(numAccumulators == vpExpression.size());
+
+        for (bool hasNext = !pSource->eof(); hasNext; hasNext = pSource->advance()) {
+            Document input  = pSource->getCurrent();
 
             /* get the _id value */
-            Value pId(pIdExpression->evaluate(pDocument));
+            Value id = pIdExpression->evaluate(input);
 
-            /* treat Undefined the same as NULL SERVER-4674 */
-            if (pId.getType() == Undefined)
-                pId = Value(jstNULL);
+            /* treat missing values the same as NULL SERVER-4674 */
+            if (id.missing())
+                id = Value(BSONNULL);
 
             /*
               Look for the _id value in the map; if it's not there, add a
               new entry with a blank accumulator.
             */
-            vector<intrusive_ptr<Accumulator> > *pGroup;
-            GroupsType::iterator it(groups.find(pId));
-            if (it != groups.end()) {
-                /* point at the existing accumulators */
-                pGroup = &it->second;
-            }
-            else {
-                /* insert a new group into the map */
-                groups[pId] = vector<intrusive_ptr<Accumulator> >();
+            vector<intrusive_ptr<Accumulator> >& group = groups[id];
 
-                /* find the accumulator vector (the map value) */
-                it = groups.find(pId);
-                pGroup = &it->second;
+            if (numAccumulators == 0)
+                continue; // we are basically building a set
 
+            if (group.empty()) {
                 /* add the accumulators */
-                const size_t n = vpAccumulatorFactory.size();
-                pGroup->reserve(n);
-                for(size_t i = 0; i < n; ++i) {
-                    intrusive_ptr<Accumulator> pAccumulator(
-                        (*vpAccumulatorFactory[i])(pExpCtx));
-                    pAccumulator->addOperand(vpExpression[i]);
-                    pGroup->push_back(pAccumulator);
+                group.reserve(numAccumulators);
+                for (size_t i = 0; i < numAccumulators; i++) {
+                    intrusive_ptr<Accumulator> accum = (*vpAccumulatorFactory[i])(pExpCtx);
+                    accum->addOperand(vpExpression[i]);
+                    group.push_back(accum);
                 }
             }
 
-            /* point at the existing key */
-            // unneeded atm // pId = it.first;
-
             /* tickle all the accumulators for the group we found */
-            const size_t n = pGroup->size();
-            for(size_t i = 0; i < n; ++i)
-                (*pGroup)[i]->evaluate(pDocument);
+            dassert(numAccumulators == group.size());
+            for (size_t i = 0; i < numAccumulators; i++)
+                group[i]->evaluate(input);
         }
 
         /* start the group iterator */
         groupsIterator = groups.begin();
-        if (groupsIterator != groups.end())
-            pCurrent = makeDocument(groupsIterator);
         populated = true;
     }
 
@@ -379,8 +342,13 @@ namespace mongo {
         /* add the rest of the fields */
         for(size_t i = 0; i < n; ++i) {
             Value pValue((*pGroup)[i]->getValue());
-            if (pValue.getType() != Undefined)
+            if (pValue.missing()) {
+                // we return null in this case so return objects are predictable
+                out.addField(vFieldName[i], Value(BSONNULL));
+            }
+            else {
                 out.addField(vFieldName[i], pValue);
+            }
         }
 
         return out.freeze();

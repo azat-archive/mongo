@@ -20,6 +20,7 @@
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/client/dbclientmockcursor.h"
 #include "mongo/s/chunk_diff.h"
+#include "mongo/s/chunk_version.h"
 #include "mongo/s/collection_manager.h"
 #include "mongo/s/type_chunk.h"
 #include "mongo/s/type_collection.h"
@@ -89,8 +90,8 @@ namespace mongo {
 
     CollectionManager* MetadataLoader::makeEmptyCollectionManager() {
         CollectionManager* manager = new CollectionManager;
-        manager->_maxCollVersion = ShardChunkVersion(1, 0, OID());
-        manager->_maxShardVersion = ShardChunkVersion(1, 0, OID());
+        manager->_maxCollVersion = ChunkVersion(1, 0, OID());
+        manager->_maxShardVersion = ChunkVersion(1, 0, OID());
         dassert(manager->isValid());
         return manager;
     }
@@ -110,7 +111,7 @@ namespace mongo {
 
             try {
                 connPtr.reset(
-                    ScopedDbConnection::getInternalScopedDbConnection(_configLoc.toString()));
+                    ScopedDbConnection::getInternalScopedDbConnection(_configLoc.toString(), 30));
                 ScopedDbConnection& conn = *connPtr;
 
                 collObj = conn->findOne(CollectionType::ConfigNS, QUERY(CollectionType::ns()<<ns));
@@ -129,8 +130,7 @@ namespace mongo {
         }
 
         CollectionType collDoc;
-        collDoc.parseBSON(collObj);
-        if (!collDoc.isValid(errMsg)) {
+        if (!collDoc.parseBSON(collObj, errMsg) || !collDoc.isValid(errMsg)) {
             return false;
         }
 
@@ -154,7 +154,7 @@ namespace mongo {
             }
 
             manager->_key = BSONObj();
-            manager->_maxShardVersion = ShardChunkVersion(1, 0, collDoc.getEpoch());
+            manager->_maxShardVersion = ChunkVersion(1, 0, collDoc.getEpoch());
             manager->_maxCollVersion = manager->_maxShardVersion;
         }
         else {
@@ -174,13 +174,13 @@ namespace mongo {
                                     CollectionManager* manager,
                                     string* errMsg) {
 
-        map<string,ShardChunkVersion> versionMap;
-        manager->_maxCollVersion = ShardChunkVersion(0, 0, collDoc.getEpoch());
+        map<string,ChunkVersion> versionMap;
+        manager->_maxCollVersion = ChunkVersion(0, 0, collDoc.getEpoch());
 
         // Check to see if we should use the old version or not.
         if (oldManager) {
 
-            ShardChunkVersion oldVersion = oldManager->getMaxShardVersion();
+            ChunkVersion oldVersion = oldManager->getMaxShardVersion();
 
             if (oldVersion.isSet() && oldVersion.hasCompatibleEpoch(collDoc.getEpoch())) {
 
@@ -209,7 +209,7 @@ namespace mongo {
         try {
 
             scoped_ptr<ScopedDbConnection> connPtr(
-                ScopedDbConnection::getInternalScopedDbConnection(_configLoc.toString()));
+                ScopedDbConnection::getInternalScopedDbConnection(_configLoc.toString(), 30));
             ScopedDbConnection& conn = *connPtr;
 
             auto_ptr<DBClientCursor> cursor = conn->query(ChunkType::ConfigNS,
@@ -217,7 +217,7 @@ namespace mongo {
 
             if (!cursor.get()) {
                 // 'errMsg' was filled by the getChunkCursor() call.
-                manager->_maxCollVersion = ShardChunkVersion();
+                manager->_maxCollVersion = ChunkVersion();
                 manager->_chunksMap.clear();
                 connPtr->done();
                 return false;
@@ -244,7 +244,7 @@ namespace mongo {
 
                 warning() << *errMsg << endl;
 
-                manager->_maxCollVersion = ShardChunkVersion();
+                manager->_maxCollVersion = ChunkVersion();
                 manager->_chunksMap.clear();
                 connPtr->done();
                 return false;
@@ -261,7 +261,7 @@ namespace mongo {
 
                 warning() << errMsg << endl;
 
-                manager->_maxCollVersion = ShardChunkVersion();
+                manager->_maxCollVersion = ChunkVersion();
                 manager->_chunksMap.clear();
                 connPtr->done();
                 return false;

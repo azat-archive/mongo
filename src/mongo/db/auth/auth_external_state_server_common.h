@@ -18,7 +18,6 @@
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
-#include "mongo/client/dbclientinterface.h"
 #include "mongo/db/auth/auth_external_state.h"
 
 namespace mongo {
@@ -33,13 +32,19 @@ namespace mongo {
         virtual ~AuthExternalStateServerCommon();
 
         virtual bool shouldIgnoreAuthChecks() const;
-        virtual Status initialize(DBClientBase* adminDBConnection);
 
     protected:
         AuthExternalStateServerCommon();
 
+        // Checks whether or not localhost connections should be given full access and stores the
+        // result in _allowLocalhost.  Currently localhost connections are only given full access
+        // if there are no users in the admin database.
+        virtual void _checkShouldAllowLocalhost();
+
     private:
-        bool _adminUserExists;
+
+        bool _allowLocalhost;
+
     };
 
 } // namespace mongo

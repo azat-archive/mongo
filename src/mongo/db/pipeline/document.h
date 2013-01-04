@@ -109,7 +109,10 @@ namespace mongo {
          */
         static int compare(const Document& lhs, const Document& rhs);
 
-        string toString() const; // TODO support streams
+        string toString() const;
+
+        friend
+        ostream& operator << (ostream& out, const Document& doc) { return out << doc.toString(); }
 
         /** Calculate a hash value.
          *
@@ -120,6 +123,9 @@ namespace mongo {
 
         /// Add this document to the BSONObj under construction with the given BSONObjBuilder.
         void toBson(BSONObjBuilder *pBsonObjBuilder) const;
+
+        // Support BSONObjBuilder and BSONArrayBuilder "stream" API
+        friend BSONObjBuilder& operator << (BSONObjBuilderValueStream& builder, const Document& d);
 
         /** Return the abstract Position of a field, suitable to pass to operator[] or getField().
          *  This can potentially save time if you need to refer to a field multiple times.
@@ -278,7 +284,17 @@ namespace mongo {
         /// Logically remove a field. Note that memory usage does not decrease.
         void remove(StringData key) { getField(key) = Value(); }
 
-        /// Takes positions vector from Document::getNestedField.
+        /** Gets/Sets a nested field given a path.
+         *
+         *  All fields along path are created as empty Documents if they don't exist
+         *  or are any other type.
+         */
+        MutableValue getNestedField(const FieldPath& dottedField);
+        void setNestedField(const FieldPath& dottedField, const Value& val) {
+            getNestedField(dottedField) = val;
+        }
+
+        /// Takes positions vector from Document::getNestedField. All fields in path must exist.
         MutableValue getNestedField(const vector<Position>& positions);
         void setNestedField(const vector<Position>& positions, const Value& val) {
             getNestedField(positions) = val;
@@ -292,8 +308,11 @@ namespace mongo {
          *  TODO: there are some optimizations that may make sense at freeze time.
          */
         Document freeze() {
-            Document ret(storagePtr());
-            reset(NULL);
+            // This essentially moves _storage into a new Document by way of temp.
+            Document ret;
+            intrusive_ptr<const DocumentStorage> temp (storagePtr(), /*inc_ref_count=*/false);
+            temp.swap(ret._storage);
+            _storage = NULL;
             return ret;
         }
 
@@ -340,9 +359,9 @@ namespace mongo {
             return const_cast<DocumentStorage&>(*storagePtr());
         }
 
-        MutableValue getNestedFieldHelper(MutableDocument& md,
-                                          const vector<Position>& positions,
-                                          size_t level);
+        // recursive helpers for same-named public methods
+        MutableValue getNestedFieldHelper(const FieldPath& dottedField, size_t level);
+        MutableValue getNestedFieldHelper(const vector<Position>& positions, size_t level);
 
         // this should only be called by storage methods and peek/freeze
         const DocumentStorage* storagePtr() const {

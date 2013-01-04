@@ -25,8 +25,9 @@
 #include <sys/wait.h>
 #endif
 
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/security_key.h"
 #include "mongo/db/cmdline.h"
-#include "mongo/db/security_common.h"
 #include "mongo/util/log.h"
 #include "mongo/util/net/listen.h"
 #include "mongo/util/processinfo.h"
@@ -191,30 +192,6 @@ namespace mongo {
 
             noauth = false;
         }
-
-#ifdef MONGO_SSL
-        if (cmdLine.sslOnNormalPorts) {
-
-            if ( cmdLine.sslPEMKeyPassword.size() == 0 ) {
-                log() << "need sslPEMKeyPassword" << endl;
-                return false;
-            }
-
-            if ( cmdLine.sslPEMKeyFile.size() == 0 ) {
-                log() << "need sslPEMKeyFile" << endl;
-                return false;
-            }
-
-            cmdLine.sslServerManager = new SSLManager( false );
-            if ( ! cmdLine.sslServerManager->setupPEM( cmdLine.sslPEMKeyFile , cmdLine.sslPEMKeyPassword ) ) {
-                return false;
-            }
-        }
-        else if ( cmdLine.sslPEMKeyFile.size() || cmdLine.sslPEMKeyPassword.size() ) {
-            log() << "need to enable sslOnNormalPorts" << endl;
-            return false;
-        }
-#endif
 
         return true;
     }

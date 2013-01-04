@@ -25,7 +25,7 @@
 #include "mongo/db/matcher.h"
 #include "mongo/db/namespacestring.h"
 #include "mongo/s/shard.h"
-#include "mongo/s/util.h"
+#include "mongo/s/stale_exception.h"  // for StaleConfigException
 #include "mongo/util/concurrency/mvar.h"
 
 namespace mongo {
@@ -78,6 +78,8 @@ namespace mongo {
 
         /** call before using */
         void init();
+
+        virtual std::string getNS() { return _ns; }
 
         virtual bool more() = 0;
         virtual BSONObj next() = 0;

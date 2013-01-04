@@ -518,7 +518,7 @@ namespace DocumentSourceTests {
         };
 
         /** $group _id is a regular expression (not supported). */
-        class IdRegularExpression : public ParseErrorBase {
+        class IdRegularExpression : public IdConstantBase {
             BSONObj spec() { return fromjson( "{_id:/a/}" ); }
         };
 
@@ -794,7 +794,7 @@ namespace DocumentSourceTests {
                 client.insert( ns, BSON( "a" << "d" << "b" << "eadbe" << "d" << "ef" ) );
             }
             virtual BSONObj groupSpec() {
-                return BSON( "_id" << BSON( "$add"
+                return BSON( "_id" << BSON( "$concat"
                                             << BSON_ARRAY( "$a" << "$b" << "$c" << "$d" ) ) );
             }
             virtual string expectedResultSetString() { return "[{_id:'deadbeef'}]"; }
@@ -808,7 +808,7 @@ namespace DocumentSourceTests {
             virtual BSONObj groupSpec() {
                 return BSON( "_id" << 0 << "first" << BSON( "$first" << "$missing" ) );
             }
-            virtual string expectedResultSetString() { return "[{_id:0}]"; }            
+            virtual string expectedResultSetString() { return "[{_id:0, first:null}]"; }
         };
 
         /** Simulate merging sharded results in the router. */ 
@@ -1075,7 +1075,7 @@ namespace DocumentSourceTests {
                 checkBsonRepresentation( spec );
                 _sort->setSource( source() );
             }
-            DocumentSource* sort() { return _sort.get(); }
+            DocumentSourceSort* sort() { return dynamic_cast<DocumentSourceSort*>(_sort.get()); }
             /** Assert that iterator state accessors consistently report the source is exhausted. */
             void assertExhausted() const {
                 // eof() is true.
@@ -1119,6 +1119,44 @@ namespace DocumentSourceTests {
                 // Another result is available, so advance() succeeds.
                 ASSERT( sort()->advance() );
                 ASSERT_EQUALS( 2, sort()->getCurrent()->getField( "a" ).getInt() );
+            }
+        };
+
+        class SortWithLimit : public Base {
+        public:
+            void run() {
+                createSort(BSON("a" << 1));
+                ASSERT_EQUALS(sort()->getLimit(), -1);
+
+                { // pre-limit checks
+                    BSONArrayBuilder arr;
+                    sort()->addToBsonArray(&arr, false);
+                    ASSERT_EQUALS(arr.arr(), BSON_ARRAY(BSON("$sort" << BSON("a" << 1))));
+
+                    ASSERT(sort()->getShardSource() == NULL);
+                    ASSERT(sort()->getRouterSource() != NULL);
+                }
+
+                ASSERT_TRUE(sort()->coalesce(mkLimit(10)));
+                ASSERT_EQUALS(sort()->getLimit(), 10);
+                ASSERT_TRUE(sort()->coalesce(mkLimit(15)));
+                ASSERT_EQUALS(sort()->getLimit(), 10); // unchanged
+                ASSERT_TRUE(sort()->coalesce(mkLimit(5)));
+                ASSERT_EQUALS(sort()->getLimit(), 5); // reduced
+
+                BSONArrayBuilder arr;
+                sort()->addToBsonArray(&arr, false);
+                ASSERT_EQUALS(arr.arr(), BSON_ARRAY(BSON("$sort" << BSON("a" << 1))
+                                                 << BSON("$limit" << sort()->getLimit())));
+
+                ASSERT(sort()->getShardSource() != NULL);
+                ASSERT(sort()->getRouterSource() != NULL);
+            }
+
+            intrusive_ptr<DocumentSource> mkLimit(int limit) {
+                BSONObj obj = BSON("$limit" << limit);
+                BSONElement e = obj.firstElement();
+                return mongo::DocumentSourceLimit::createFromBson(&e, ctx());
             }
         };
 
@@ -1308,10 +1346,13 @@ namespace DocumentSourceTests {
         };
 
         /** Sorting different types is not supported. */
-        class InconsistentTypeSort : public InvalidOperationBase {
+        class InconsistentTypeSort : public CheckResultsBase {
             void populateData() {
-                client.insert( ns, BSON( "a" << 1 ) );
-                client.insert( ns, BSON( "a" << "foo" ) );
+                client.insert( ns, BSON("_id" << 0 << "a" << 1) );
+                client.insert( ns, BSON("_id" << 1 << "a" << "foo") );
+            }
+            string expectedResultSetString() {
+                return "[{_id:0,a:1},{_id:1,a:\"foo\"}]";
             }
         };
 
@@ -1348,11 +1389,14 @@ namespace DocumentSourceTests {
             }
         };
 
-        /** A missing nested object within an array is not supported. */
-        class MissingObjectWithinArray : public InvalidOperationBase {
+        /** A missing nested object within an array returns an empty array. */
+        class MissingObjectWithinArray : public CheckResultsBase {
             void populateData() {
                 client.insert( ns, BSON( "_id" << 0 << "a" << BSON_ARRAY( 1 ) ) );
-                client.insert( ns, BSON( "_id" << 1 << "a" << BSON_ARRAY( 0 ) ) );
+                client.insert( ns, BSON( "_id" << 1 << "a" << BSON_ARRAY( BSON("b" << 1) ) ) );
+            }
+            string expectedResultSetString() {
+                return "[{_id:0,a:[1]},{_id:1,a:[{b:1}]}]";
             }
             BSONObj sortSpec() { return BSON( "a.b" << 1 ); }
         };
@@ -1676,6 +1720,29 @@ namespace DocumentSourceTests {
 
     } // namespace DocumentSourceUnwind
 
+    namespace DocumentSourceGeoNear {
+        using mongo::DocumentSourceGeoNear;
+        using mongo::DocumentSourceLimit;
+
+        class LimitCoalesce : public DocumentSourceCursor::Base {
+        public:
+            void run() {
+                intrusive_ptr<DocumentSourceGeoNear> geoNear = DocumentSourceGeoNear::create(ctx());
+
+                ASSERT_EQUALS(geoNear->getLimit(), 100);
+
+                ASSERT(geoNear->coalesce(DocumentSourceLimit::create(ctx(), 200)));
+                ASSERT_EQUALS(geoNear->getLimit(), 100);
+
+                ASSERT(geoNear->coalesce(DocumentSourceLimit::create(ctx(), 50)));
+                ASSERT_EQUALS(geoNear->getLimit(), 50);
+
+                ASSERT(geoNear->coalesce(DocumentSourceLimit::create(ctx(), 30)));
+                ASSERT_EQUALS(geoNear->getLimit(), 30);
+            }
+        };
+    } // namespace DocumentSourceGeoNear
+
     class All : public Suite {
     public:
         All() : Suite( "documentsource" ) {
@@ -1725,7 +1792,7 @@ namespace DocumentSourceTests {
             add<DocumentSourceGroup::FourValuesTwoKeys>();
             add<DocumentSourceGroup::FourValuesTwoKeysTwoAccumulators>();
             add<DocumentSourceGroup::GroupNullUndefinedIds>();
-            //add<DocumentSourceGroup::ComplexId>(); uncomment after 6195
+            add<DocumentSourceGroup::ComplexId>();
             add<DocumentSourceGroup::UndefinedAccumulatorValue>();
             add<DocumentSourceGroup::RouterMerger>();
             add<DocumentSourceGroup::Dependencies>();
@@ -1785,6 +1852,8 @@ namespace DocumentSourceTests {
             add<DocumentSourceUnwind::SeveralDocuments>();
             add<DocumentSourceUnwind::SeveralMoreDocuments>();
             add<DocumentSourceUnwind::Dependencies>();
+
+            add<DocumentSourceGeoNear::LimitCoalesce>();
         }
     } myall;
 

@@ -21,7 +21,6 @@
 
 #include "pch.h"
 
-#include "mongo/db/auth/acquired_privilege.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/principal.h"
 #include "mongo/db/auth/privilege.h"
@@ -30,7 +29,6 @@
 #include "../util/md5.hpp"
 #include "db.h"
 #include "instance.h"
-#include "security.h"
 #include "stats/snapshots.h"
 #include "background.h"
 #include "commands.h"
@@ -55,12 +53,6 @@ namespace mongo {
         unsigned long long start, timeLocked;
     };
 
-    bool execCommand( Command * c ,
-                      Client& client , int queryOptions ,
-                      const char *ns, BSONObj& cmdObj ,
-                      BSONObjBuilder& result,
-                      bool fromRepl );
-
     class DbWebServer : public MiniWebServer {
     public:
         DbWebServer(const string& ip, int port, const AdminAccess* webUsers)
@@ -82,24 +74,20 @@ namespace mongo {
         }
 
         void _authorizePrincipal(const std::string& principalName, bool readOnly) {
-            Principal* principal = new Principal(principalName);
+            Principal* principal = new Principal(PrincipalName(principalName, "local"));
             ActionSet actions = AuthorizationManager::getActionsForOldStyleUser(
                     "admin", readOnly);
-            AcquiredPrivilege privilege(Privilege("*", actions), principal);
 
             AuthorizationManager* authorizationManager = cc().getAuthorizationManager();
             authorizationManager->addAuthorizedPrincipal(principal);
-            Status status = authorizationManager->acquirePrivilege(privilege);
+            Status status = authorizationManager->acquirePrivilege(
+                    Privilege(PrivilegeSet::WILDCARD_RESOURCE, actions), principal->getName());
             verify (status == Status::OK());
         }
 
         bool allowed( const char * rq , vector<string>& headers, const SockAddr &from ) {
             if ( from.isLocalHost() || !_webUsers->haveAdminUsers() ) {
                 _authorizePrincipal("RestUser", false);
-
-                // TODO: remove this once all auth checking goes through the AuthorizationManager
-                // instead of AuthenticationInfo
-                cmdAuthenticate.authenticate( "admin", "RestUser", false );
                 return true;
             }
 
@@ -142,10 +130,6 @@ namespace mongo {
                                 user[ "readOnly" ].boolean();
 
                         _authorizePrincipal(principalName, readOnly);
-
-                        // TODO: remove this once all auth checking goes through the
-                        // AuthorizationManager instead of AuthenticationInfo
-                        cmdAuthenticate.authenticate("admin", principalName, readOnly);
                         return true;
                     }
                 }
@@ -533,7 +517,7 @@ namespace mongo {
             Client& client = cc();
 
             BSONObjBuilder result;
-            execCommand(c, client, 0, "admin.", cmdObj , result, false);
+            Command::execCommand(c, client, 0, "admin.", cmdObj , result, false);
 
             responseCode = 200;
 
@@ -556,8 +540,7 @@ namespace mongo {
 
     void webServerThread(const AdminAccess* adminAccess) {
         boost::scoped_ptr<const AdminAccess> adminAccessPtr(adminAccess); // adminAccess is owned here
-        Client& client = Client::initThread("websvr");
-        client.initializeAuthorizationManager();
+        Client::initThread("websvr");
         const int p = cmdLine.port + 1000;
         DbWebServer mini(cmdLine.bind_ip, p, adminAccessPtr.get());
         mini.initAndListen();

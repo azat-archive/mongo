@@ -56,10 +56,11 @@ namespace mongo {
         static const std::string ConfigNS;
 
         // Field names and types in the shard collection type.
-        static BSONField<std::string> name;
-        static BSONField<std::string> host;
-        static BSONField<bool> draining;
-        static BSONField<long long> maxSize;
+        static BSONField<std::string> name;     // shard's id
+        static BSONField<std::string> host;     // connection string for the host(s)
+        static BSONField<bool> draining;        // is it draining chunks?
+        static BSONField<long long> maxSize;    // max allowed disk space usage
+        static BSONField<BSONArray> tags;       // shard tags
 
         //
         // shard type methods
@@ -81,9 +82,9 @@ namespace mongo {
 
         /**
          * Clears and populates the internal state using the 'source' BSON object if the
-         * latter contains valid values. Otherwise clear the internal state.
+         * latter contains valid values. Otherwise sets errMsg and returns false.
          */
-        void parseBSON(BSONObj source);
+        bool parseBSON(BSONObj source, std::string* errMsg);
 
         /**
          * Clears the internal state.
@@ -93,7 +94,7 @@ namespace mongo {
         /**
          * Copies all the fields present in 'this' to 'other'.
          */
-        void cloneTo(ShardType* other);
+        void cloneTo(ShardType* other) const;
 
         /**
          * Returns a string representation of the current internal state.
@@ -104,10 +105,10 @@ namespace mongo {
         // individual field accessors
         //
 
-        void setName(const StringData& name) { _name = std::string(name.data(), name.size()); }
+        void setName(const StringData& name) { _name = name.toString(); }
         const std::string& getName() const { return _name; }
 
-        void setHost(const StringData& host) { _host = std::string(host.data(), host.size()); }
+        void setHost(const StringData& host) { _host = host.toString(); }
         const std::string& getHost() const { return _host; }
 
         void setDraining(bool draining) { _draining = draining; }
@@ -116,12 +117,16 @@ namespace mongo {
         void setMaxSize(uint64_t maxSize) { _maxSize = maxSize; }
         uint64_t getMaxSize() const { return _maxSize; }
 
+        void setTags(const BSONArray& tags) { _tags = tags; }
+        BSONArray getTags() const { return _tags; }
+
     private:
         // Convention: (M)andatory, (O)ptional, (S)pecial rule.
         std::string _name;   // (M) shard's id
         std::string _host;   // (M) connection string for the host(s)
         bool _draining;      // (O) is it draining chunks?
         long long _maxSize;  // (O) maximum allowed disk space in MB
+        BSONArray _tags;     // (O) shard tags
     };
 
 }  // namespace mongo

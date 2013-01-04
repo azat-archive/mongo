@@ -17,6 +17,9 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/base/owned_pointer_vector.h"
+#include "mongo/base/status.h"
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/principal.h"
 #include "mongo/db/client.h"
 #include "mongo/db/cmdline.h"
 #include "mongo/db/dbhelpers.h"
@@ -25,6 +28,7 @@
 #include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/connections.h"
 #include "mongo/db/repl/rs.h"
+#include "mongo/db/server_parameters.h"
 #include "mongo/platform/bits.h"
 #include "mongo/s/d_logic.h"
 #include "mongo/util/net/sock.h"
@@ -99,9 +103,12 @@ namespace mongo {
     void ReplSetImpl::assumePrimary() {
         LOG(2) << "replSet assuming primary" << endl;
         verify( iAmPotentiallyHot() );
-        // so we are synchronized with _logOp().  perhaps locking local db only would suffice, but until proven 
-        // will take this route, and this is very rare so it doesn't matter anyway
-        Lock::GlobalWrite lk; 
+
+        // Wait for replication to stop and buffer to be consumed
+        LOG(1) << "replSet waiting for replication to finish before becoming primary" << endl;
+        replset::BackgroundSync::get()->stopReplicationAndFlushBuffer();
+
+        Lock::GlobalWrite lk;
 
         // Make sure that new OpTimes are higher than existing ones even with clock skew
         DBDirectClient c;
@@ -684,14 +691,14 @@ namespace mongo {
             try {
                 OwnedPointerVector<ReplSetConfig> configs;
                 try {
-                    configs.vector().push_back(ReplSetConfig::makeDirect());
+                    configs.mutableVector().push_back(ReplSetConfig::makeDirect());
                 }
                 catch(DBException& e) {
                     log() << "replSet exception loading our local replset configuration object : " << e.toString() << rsLog;
                 }
                 for( vector<HostAndPort>::const_iterator i = _seeds->begin(); i != _seeds->end(); i++ ) {
                     try {
-                        configs.vector().push_back( ReplSetConfig::make(*i) );
+                        configs.mutableVector().push_back( ReplSetConfig::make(*i) );
                     }
                     catch( DBException& e ) {
                         log() << "replSet exception trying to load config from " << *i << " : " << e.toString() << rsLog;
@@ -704,7 +711,7 @@ namespace mongo {
                              i != replSettings.discoveredSeeds.end(); 
                              i++) {
                             try {
-                                configs.vector().push_back( ReplSetConfig::make(HostAndPort(*i)) );
+                                configs.mutableVector().push_back( ReplSetConfig::make(HostAndPort(*i)) );
                             }
                             catch( DBException& ) {
                                 LOG(1) << "replSet exception trying to load config from discovered seed " << *i << rsLog;
@@ -716,7 +723,7 @@ namespace mongo {
 
                 if (!replSettings.reconfig.isEmpty()) {
                     try {
-                        configs.vector().push_back(ReplSetConfig::make(replSettings.reconfig,
+                        configs.mutableVector().push_back(ReplSetConfig::make(replSettings.reconfig,
                                                                        true));
                     }
                     catch( DBException& re) {
@@ -727,8 +734,8 @@ namespace mongo {
 
                 int nok = 0;
                 int nempty = 0;
-                for( vector<ReplSetConfig*>::iterator i = configs.vector().begin();
-                     i != configs.vector().end(); i++ ) {
+                for( vector<ReplSetConfig*>::iterator i = configs.mutableVector().begin();
+                     i != configs.mutableVector().end(); i++ ) {
                     if( (*i)->ok() )
                         nok++;
                     if( (*i)->empty() )
@@ -736,7 +743,7 @@ namespace mongo {
                 }
                 if( nok == 0 ) {
 
-                    if( nempty == (int) configs.vector().size() ) {
+                    if( nempty == (int) configs.mutableVector().size() ) {
                         startupStatus = EMPTYCONFIG;
                         startupStatusMsg.set("can't get " + rsConfigNs + " config from self or any seed (EMPTYCONFIG)");
                         log() << "replSet can't get " << rsConfigNs << " config from self or any seed (EMPTYCONFIG)" << rsLog;
@@ -758,7 +765,7 @@ namespace mongo {
                     continue;
                 }
 
-                if( !_loadConfigFinish(configs.vector()) ) {
+                if( !_loadConfigFinish(configs.mutableVector()) ) {
                     log() << "replSet info Couldn't load config yet. Sleeping 20sec and will try again." << rsLog;
                     sleepsecs(20);
                     continue;
@@ -848,9 +855,9 @@ namespace mongo {
     void replLocalAuth() {
         if ( noauth )
             return;
-        cc().getAuthenticationInfo()->authorize("local","_repl");
+        cc().getAuthorizationManager()->grantInternalAuthorization("_repl");
     }
-    
+
     void ReplSetImpl::setMinValid(BSONObj obj) {
         BSONObjBuilder builder;
         builder.appendTimestamp("ts", obj["ts"].date());
@@ -859,5 +866,73 @@ namespace mongo {
         Helpers::putSingleton("local.replset.minvalid", builder.obj());
     }
 
+    OpTime ReplSetImpl::getMinValid() {
+        Lock::DBRead lk("local.replset.minvalid");
+        BSONObj mv;
+        if (Helpers::getSingleton("local.replset.minvalid", mv)) {
+            return mv["ts"]._opTime();
+        }
+        return OpTime();
+    }
+
+    class ReplIndexPrefetch : public ServerParameter {
+    public:
+        ReplIndexPrefetch()
+            : ServerParameter( ServerParameterSet::getGlobal(), "replIndexPrefetch" ) {
+        }
+
+        virtual ~ReplIndexPrefetch() {
+        }
+
+        const char * _value() {
+            if (!theReplSet)
+                return "uninitialized";
+            ReplSetImpl::IndexPrefetchConfig ip = theReplSet->getIndexPrefetchConfig();
+            switch (ip) {
+            case ReplSetImpl::PREFETCH_NONE:
+                return "none";
+            case ReplSetImpl::PREFETCH_ID_ONLY:
+                return "_id_only";
+            case ReplSetImpl::PREFETCH_ALL:
+                return "all";
+            default:
+                return "invalid";
+            }
+        }
+
+        virtual void append( BSONObjBuilder& b, const string& name ) {
+            b.append( name, _value() );
+        }
+
+        virtual Status set( const BSONElement& newValueElement ) {
+            if (!theReplSet) {
+                return Status( ErrorCodes::BadValue, "replication is not enabled" );
+            }
+
+            std::string prefetch = newValueElement.valuestrsafe();
+            return setFromString( prefetch );
+        }
+
+        virtual Status setFromString( const string& prefetch ) {
+            log() << "changing replication index prefetch behavior to " << prefetch << endl;
+
+            ReplSetImpl::IndexPrefetchConfig prefetchConfig;
+
+            if (prefetch == "none")
+                prefetchConfig = ReplSetImpl::PREFETCH_NONE;
+            else if (prefetch == "_id_only")
+                prefetchConfig = ReplSetImpl::PREFETCH_ID_ONLY;
+            else if (prefetch == "all")
+                prefetchConfig = ReplSetImpl::PREFETCH_ALL;
+            else {
+                return Status( ErrorCodes::BadValue,
+                               str::stream() << "unrecognized indexPrefetch setting: " << prefetch );
+            }
+
+            theReplSet->setIndexPrefetchConfig(prefetchConfig);
+            return Status::OK();
+        }
+
+    } replIndexPrefetch;
 }
 

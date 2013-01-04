@@ -39,10 +39,11 @@ namespace mongo {
         fassertFailed(16462);
     }
 
-    void ShardingConnectionHook::onHandedOut( DBClientBase * conn ) {
-        if( _shardedConnections ){
-            ClientInfo::get()->addShard( conn->getServerAddress() );
-        }
+    /** When this callback is run, we record a shard that we've used for useful work
+     *  in an operation to be read later by getLastError()
+    */
+    void usingAShardConnection( const string& addr ) {
+        ClientInfo::get()->addShard( addr );
     }
 
     TSP_DEFINE(Client,currentClient)
@@ -60,29 +61,6 @@ namespace mongo {
     Client::~Client() {}
     bool Client::shutdown() { return true; }
 
-    void ClientBasic::initializeAuthorizationManager() {
-        std::string adminNs = "admin";
-        DBConfigPtr config = grid.getDBConfig(adminNs);
-        Shard shard = config->getShard(adminNs);
-        scoped_ptr<ScopedDbConnection> connPtr(
-                ScopedDbConnection::getInternalScopedDbConnection(shard.getConnString(), 30.0));
-        ScopedDbConnection& conn = *connPtr;
-
-        //
-        // Note: The connection mechanism here is *not* ideal, and should not be used elsewhere.
-        // It is safe in this particular case because the admin database is always on the config
-        // server and does not move.
-        //
-
-        AuthorizationManager* authManager = new AuthorizationManager(new AuthExternalStateMongos);
-        Status status = authManager->initialize(conn.get());
-        massert(16479,
-                mongoutils::str::stream() << "Error initializing AuthorizationManager: "
-                                          << status.reason(),
-                status == Status::OK());
-        setAuthorizationManager(authManager);
-    }
-
     Client& Client::initThread(const char *desc, AbstractMessagingPort *mp) {
         // mp is non-null only for client connections, and mongos uses ClientInfo for those
         massert(16478, "Client being used for incoming connection thread in mongos", mp == NULL);
@@ -93,6 +71,7 @@ namespace mongo {
                 "Non-null messaging port provided to Client::initThread in a mongos",
                 mp == NULL);
         Client *c = new Client(desc, mp);
+        c->setAuthorizationManager(new AuthorizationManager(new AuthExternalStateMongos()));
         currentClient.reset(c);
         mongo::lastError.initThread();
         return *c;
@@ -105,43 +84,84 @@ namespace mongo {
         return "";
     }
 
-    bool execCommand( Command * c ,
-                      Client& client , int queryOptions ,
-                      const char *ns, BSONObj& cmdObj ,
-                      BSONObjBuilder& result,
-                      bool fromRepl ) {
+    // Need a version that takes a Client to match the mongod interface so the web server can call
+    // execCommand and not need to worry if it's in a mongod or mongos.
+    void Command::execCommand(Command * c,
+                              Client& client,
+                              int queryOptions,
+                              const char *ns,
+                              BSONObj& cmdObj,
+                              BSONObjBuilder& result,
+                              bool fromRepl ) {
+        execCommandClientBasic(c, client, queryOptions, ns, cmdObj, result, fromRepl);
+    }
+
+    void Command::execCommandClientBasic(Command * c ,
+                                         ClientBasic& client,
+                                         int queryOptions,
+                                         const char *ns,
+                                         BSONObj& cmdObj,
+                                         BSONObjBuilder& result,
+                                         bool fromRepl ) {
         verify(c);
 
-        string dbname = nsToDatabase( ns );
+        std::string dbname = nsToDatabase(ns);
 
-        if ( cmdObj["help"].trueValue() ) {
-            stringstream ss;
-            ss << "help for: " << c->name << " ";
-            c->help( ss );
-            result.append( "help" , ss.str() );
-            result.append( "lockType" , c->locktype() );
-            return true;
-        }
-
-        if ( c->adminOnly() ) {
-            if ( dbname != "admin" ) {
-                result.append( "errmsg" ,  "access denied- use admin db" );
-                log() << "command denied: " << cmdObj.toString() << endl;
-                return false;
+        // Access control checks
+        if (!noauth) {
+            std::vector<Privilege> privileges;
+            c->addRequiredPrivileges(dbname, cmdObj, &privileges);
+            AuthorizationManager* authManager = client.getAuthorizationManager();
+            if (c->requiresAuth() && (!authManager->checkAuthForPrivileges(privileges).isOK())) {
+                result.append("note", str::stream() << "not authorized for command: " <<
+                                    c->name << " on database " << dbname);
+                appendCommandStatus(result, false, "unauthorized");
+                return;
             }
-            LOG( 2 ) << "command: " << cmdObj << endl;
+        }
+        if (c->adminOnly() && c->localHostOnlyIfNoAuth(cmdObj) && noauth &&
+                !client.getIsLocalHostConnection()) {
+            log() << "command denied: " << cmdObj.toString() << endl;
+            appendCommandStatus(result,
+                               false,
+                               "unauthorized: this command must run from localhost when running db "
+                               "without auth");
+            return;
+        }
+        if (c->adminOnly() && !startsWith(ns, "admin.")) {
+            log() << "command denied: " << cmdObj.toString() << endl;
+            appendCommandStatus(result, false, "access denied - use admin db");
+            return;
+        }
+        // End of access control checks
+
+        if (cmdObj.getBoolField("help")) {
+            stringstream help;
+            help << "help for: " << c->name << " ";
+            c->help( help );
+            result.append( "help" , help.str() );
+            result.append( "lockType" , c->locktype() );
+            appendCommandStatus(result, true, "");
+            return;
+        }
+        std::string errmsg;
+        bool ok;
+        try {
+            ok = c->run( dbname , cmdObj, queryOptions, errmsg, result, false );
+        }
+        catch (DBException& e) {
+            ok = false;
+            int code = e.getCode();
+            if (code == RecvStaleConfigCode) { // code for StaleConfigException
+                throw;
+            }
+
+            stringstream ss;
+            ss << "exception: " << e.what();
+            errmsg = ss.str();
+            result.append( "code" , code );
         }
 
-        if (!client.getAuthenticationInfo()->isAuthorized(dbname)) {
-            result.append("errmsg" , "unauthorized");
-            result.append("note" , "from execCommand" );
-            return false;
-        }
-
-        string errmsg;
-        int ok = c->run( dbname , cmdObj , queryOptions, errmsg , result , fromRepl );
-        if ( ! ok )
-            result.append( "errmsg" , errmsg );
-        return ok;
+        appendCommandStatus(result, ok, errmsg);
     }
 }

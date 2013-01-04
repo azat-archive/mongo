@@ -59,6 +59,15 @@ try:
 except ImportError:
     import pickle
 
+try:
+    import json
+except:
+    try:
+        import simplejson as json
+    except:
+        json = None
+
+
 # TODO clean this up so we don't need globals...
 mongo_repo = os.getcwd() #'./'
 failfile = os.path.join(mongo_repo, 'failfile.smoke')
@@ -84,6 +93,8 @@ screwy_in_slave = {}
 smoke_db_prefix = ''
 small_oplog = False
 small_oplog_rs = False
+
+all_test_results = []
 
 # This class just implements the with statement API, for a sneaky
 # purpose below.
@@ -180,6 +191,8 @@ class mongod(object):
             call(argv)
         utils.ensureDir(dir_name)
         argv = [mongod_executable, "--port", str(self.port), "--dbpath", dir_name]
+        # This should always be set for tests
+        argv += ['--setParameter', 'enableTestCommands=1']
         if self.kwargs.get('small_oplog'):
             argv += ["--master", "--oplogSize", "511"]
         if self.kwargs.get('small_oplog_rs'):
@@ -192,7 +205,15 @@ class mongod(object):
             argv += ['--nopreallocj']
         if self.kwargs.get('auth'):
             argv += ['--auth']
+            authMechanism = self.kwargs.get('authMechanism', 'MONGO-CR')
+            if authMechanism != 'MONGO-CR':
+                argv.append('--setParameter=authenticationMechanisms=' + authMechanism)
             self.auth = True
+        if self.kwargs.get('use_ssl'):
+            argv += ['--sslOnNormalPorts',
+                     '--sslPEMKeyFile', 'jstests/libs/server.pem',
+                     '--sslCAFile', 'jstests/libs/ca.pem']
+        
         print "running " + " ".join(argv)
         self.proc = self._start(buildlogger(argv, is_global=True))
 
@@ -348,6 +369,7 @@ def skipTest(path):
         authTestsToSkip = [("sharding", "read_pref_rs_client.js"), # SERVER-6972
                            ("sharding", "sync_conn_cmd.js"), #SERVER-6327
                            ("sharding", "gle_with_conf_servers.js"), # SERVER-6972
+                           ("jstests", "copydb.js"), # SERVER-7864
                            ("sharding", "sync3.js"), # SERVER-6388 for this and those below
                            ("sharding", "sync6.js"),
                            ("sharding", "parallel.js"),
@@ -382,11 +404,15 @@ def runTest(test):
         if os.path.basename(path) in ('python', 'python.exe'):
             path = argv[1]
     elif ext == ".js":
-        argv = [shell_executable, "--port", mongod_port]
+        argv = [shell_executable, "--port", mongod_port, '--authenticationMechanism', authMechanism]
         if not usedb:
             argv += ["--nodb"]
         if small_oplog or small_oplog_rs:
             argv += ["--eval", 'testingReplication = true;']
+        if use_ssl:
+            argv += ["--ssl",
+                     "--sslPEMKeyFile", "jstests/libs/client.pem",
+                     "--sslCAFile", "jstests/libs/ca.pem"]
         argv += [path]
     elif ext in ["", ".exe"]:
         # Blech.
@@ -399,7 +425,7 @@ def runTest(test):
             argv = [test_path and os.path.abspath(os.path.join(test_path, path)) or path,
                     "--port", mongod_port]
     else:
-        raise Bug("fell off in extenstion case: %s" % path)
+        raise Bug("fell off in extension case: %s" % path)
 
     if keyFile:
         f = open(keyFile, 'r')
@@ -453,7 +479,19 @@ def runTest(test):
     t2 = time.time()
     del os.environ['MONGO_TEST_FILENAME']
 
-    sys.stdout.write("                %fms\n" % ((t2 - t1) * 1000))
+    timediff = t2 - t1
+    # timediff is seconds by default
+    scale = 1
+    suffix = "seconds"
+    # if timediff is less than 10 seconds use ms
+    if timediff < 10:
+        scale = 1000
+        suffix = "ms"
+    # if timediff is more than 60 seconds use minutes
+    elif timediff > 60:
+        scale = 1.0 / 60.0
+        suffix = "minutes"
+    sys.stdout.write("                %10.4f %s\n" % ((timediff) * scale, suffix))
     sys.stdout.flush()
 
     if r != 0:
@@ -461,8 +499,9 @@ def runTest(test):
     
     if start_mongod:
         try:
-            c = Connection( "127.0.0.1" , int(mongod_port) )
+            c = Connection(host="127.0.0.1", port=int(mongod_port), ssl=use_ssl)
         except Exception,e:
+            print "Exception from pymongo: ", e
             raise TestServerFailure(path)
 
     print ""
@@ -477,14 +516,27 @@ def run_tests(tests):
     # but "with" is only supported on Python 2.5+
 
     if start_mongod:
-        master = mongod(small_oplog_rs=small_oplog_rs,small_oplog=small_oplog,no_journal=no_journal,no_preallocj=no_preallocj,auth=auth).__enter__()
+        master = mongod(small_oplog_rs=small_oplog_rs,
+                        small_oplog=small_oplog,
+                        no_journal=no_journal,
+                        no_preallocj=no_preallocj,
+                        auth=auth,
+                        authMechanism=authMechanism,
+                        use_ssl=use_ssl).__enter__()
     else:
         master = Nothing()
     try:
         if small_oplog:
             slave = mongod(slave=True).__enter__()
         elif small_oplog_rs:
-            slave = mongod(slave=True,small_oplog_rs=small_oplog_rs,small_oplog=small_oplog,no_journal=no_journal,no_preallocj=no_preallocj,auth=auth).__enter__()
+            slave = mongod(slave=True,
+                           small_oplog_rs=small_oplog_rs,
+                           small_oplog=small_oplog,
+                           no_journal=no_journal,
+                           no_preallocj=no_preallocj,
+                           auth=auth,
+                           authMechanism=authMechanism,
+                           use_ssl=use_ssl).__enter__()
             primary = Connection(port=master.port, slave_okay=True);
 
             primary.admin.command({'replSetInitiate' : {'_id' : 'foo', 'members' : [
@@ -505,11 +557,16 @@ def run_tests(tests):
 
             tests_run = 0
             for tests_run, test in enumerate(tests):
+                test_result = { "test": test[0], "start": time.time() }
                 try:
                     fails.append(test)
                     runTest(test)
                     fails.pop()
                     winners.append(test)
+
+                    test_result["passed"] = True
+                    test_result["end"] = time.time()
+                    all_test_results.append( test_result )
 
                     if small_oplog or small_oplog_rs:
                         master.wait_for_repl()
@@ -517,9 +574,19 @@ def run_tests(tests):
                         if (tests_run+1) % 20 == 0:
                             # restart mongo every 20 times, for our 32-bit machines
                             master.__exit__(None, None, None)
-                            master = mongod(small_oplog_rs=small_oplog_rs,small_oplog=small_oplog,no_journal=no_journal,no_preallocj=no_preallocj,auth=auth).__enter__()
+                            master = mongod(small_oplog_rs=small_oplog_rs,
+                                            small_oplog=small_oplog,
+                                            no_journal=no_journal,
+                                            no_preallocj=no_preallocj,
+                                            auth=auth,
+                                            authMechanism=authMechanism,
+                                            use_ssl=use_ssl).__enter__()
 
                 except TestFailure, f:
+                    test_result["passed"] = False
+                    test_result["end"] = time.time()
+                    test_result["error"] = str(f)
+                    all_test_results.append( test_result )
                     try:
                         print f
                         # Record the failing test and re-raise.
@@ -567,6 +634,8 @@ at the end of testing:"""
     if losers or lost_in_slave or lost_in_master or screwy_in_slave:
         raise Exception("Test failures")
 
+# Keys are the suite names (passed on the command line to smoke.py)
+# Values are pairs: (filenames, <start mongod before running tests>)
 suiteGlobalConfig = {"js": ("[!_]*.js", True),
                      "quota": ("quota/*.js", True),
                      "jsPerf": ("perf/*.js", True),
@@ -582,8 +651,9 @@ suiteGlobalConfig = {"js": ("[!_]*.js", True),
                      "sharding": ("sharding/*.js", False),
                      "tool": ("tool/*.js", False),
                      "aggregation": ("aggregation/*.js", True),
-                     "multiVersion": ("multiVersion/*.js", True ),
-                     "failPoint": ("fail_point/*.js", False)
+                     "multiVersion": ("multiVersion/*.js", True),
+                     "failPoint": ("fail_point/*.js", False),
+                     "ssl": ("ssl/*.js", True)
                      }
 
 def expand_suites(suites,expandUseDB=True):
@@ -651,9 +721,13 @@ def add_exe(e):
     return e
 
 def set_globals(options, tests):
-    global mongod_executable, mongod_port, shell_executable, continue_on_failure, small_oplog, small_oplog_rs, no_journal, no_preallocj, auth, keyFile, smoke_db_prefix, test_path, start_mongod
+    global mongod_executable, mongod_port, shell_executable, continue_on_failure, small_oplog, small_oplog_rs
+    global no_journal, no_preallocj, auth, authMechanism, keyFile, smoke_db_prefix, test_path, start_mongod
+    global use_ssl
     global file_of_commands_mode
     start_mongod = options.start_mongod
+    if hasattr(options, 'use_ssl'):
+        use_ssl = options.use_ssl
     #Careful, this can be called multiple times
     test_path = options.test_path
 
@@ -680,8 +754,10 @@ def set_globals(options, tests):
             print "Not running client suite with auth even though --auth was provided"
         auth = False;
         keyFile = False;
+        authMechanism = None
     else:
         auth = options.auth
+        authMechanism = options.authMechanism
         keyFile = options.keyFile
 
     if auth and not keyFile:
@@ -800,6 +876,8 @@ def main():
     parser.add_option('--auth', dest='auth', default=False,
                       action="store_true",
                       help='Run standalone mongods in tests with authentication enabled')
+    parser.add_option('--authMechanism', dest='authMechanism', default='MONGO-CR',
+                      help='Use the given authentication mechanism, when --auth is used.')
     parser.add_option('--keyFile', dest='keyFile', default=None,
                       help='Path to keyFile to use to run replSet and sharding tests with authentication enabled')
     parser.add_option('--ignore', dest='ignore_files', default=None,
@@ -813,8 +891,12 @@ def main():
     parser.add_option('--with-cleanbb', dest='with_cleanbb', default=False,
                       action="store_true",
                       help='Clear database files from previous smoke.py runs')
-    parser.add_option(
-        '--dont-start-mongod', dest='start_mongod', default=True, action='store_false')
+    parser.add_option('--dont-start-mongod', dest='start_mongod', default=True, 
+                      action='store_false',
+                      help='Do not start mongod before commencing test running')
+    parser.add_option('--use-ssl', dest='use_ssl', default=False,
+                      action='store_true',
+                      help='Run mongo shell and mongod instances with SSL encryption')
 
     # Buildlogger invocation from command line
     parser.add_option('--buildlogger-builder', dest='buildlogger_builder', default=None,
@@ -889,8 +971,12 @@ def main():
         run_tests(tests)
     finally:
         add_to_failfile(fails, options)
-        report()
 
+        f = open( "smoke-last.json", "wb" )
+        f.write( json.dumps( { "results" : all_test_results } ) )
+        f.close()
+
+        report()
 
 if __name__ == "__main__":
     main()

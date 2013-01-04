@@ -22,6 +22,8 @@
 
 #include <boost/checked_delete.hpp>
 
+#include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/background.h"
 #include "mongo/db/btree.h"
 #include "mongo/db/index_update.h"
@@ -29,6 +31,7 @@
 #include "mongo/db/ops/delete.h"
 #include "mongo/db/repl/rs.h"
 #include "mongo/util/scopeguard.h"
+#include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
@@ -247,7 +250,7 @@ namespace mongo {
 
     void getIndexChanges(vector<IndexChanges>& v, const char *ns, NamespaceDetails& d,
                          BSONObj newObj, BSONObj oldObj, bool &changedId) {
-        int z = d.nIndexesBeingBuilt();
+        int z = d.getTotalIndexCount();
         v.resize(z);
         for( int i = 0; i < z; i++ ) {
             IndexDetails& idx = d.idx(i);
@@ -266,7 +269,7 @@ namespace mongo {
     }
 
     void dupCheck(vector<IndexChanges>& v, NamespaceDetails& d, DiskLoc curObjLoc) {
-        int z = d.nIndexesBeingBuilt();
+        int z = d.getTotalIndexCount();
         for( int i = 0; i < z; i++ ) {
             IndexDetails& idx = d.idx(i);
             v[i].dupCheck(idx, curObjLoc);
@@ -292,15 +295,20 @@ namespace mongo {
                              BSONObj& fixedIndexObject) {
         sourceCollection = 0;
 
-        // logical name of the index.  todo: get rid of the name, we don't need it!
-        const char *name = io.getStringField("name");
-        uassert(12523, "no index name specified", *name);
-
         // the collection for which we are building an index
         sourceNS = io.getStringField("ns");
         uassert(10096, "invalid ns to index", sourceNS.find( '.' ) != string::npos);
         massert(10097, str::stream() << "bad table to index name on add index attempt current db: " << cc().database()->name << "  source: " << sourceNS ,
-                cc().database()->name == nsToDatabase(sourceNS.c_str()));
+                cc().database()->name == nsToDatabase(sourceNS));
+
+        uassert(16548,
+                mongoutils::str::stream() << "not authorized to create index on " << sourceNS,
+                cc().getAuthorizationManager()->checkAuthorization(sourceNS,
+                                                                   ActionType::ensureIndex));
+
+        // logical name of the index.  todo: get rid of the name, we don't need it!
+        const char *name = io.getStringField("name");
+        uassert(12523, "no index name specified", *name);
 
         BSONObj key = io.getObjectField("key");
         uassert(12524, "index key pattern too large", key.objsize() <= 2048);
@@ -316,7 +324,7 @@ namespace mongo {
             uasserted(12504, s);
         }
 
-        sourceCollection = nsdetails(sourceNS.c_str());
+        sourceCollection = nsdetails(sourceNS);
         if( sourceCollection == 0 ) {
             // try to create it
             string err;
@@ -324,7 +332,7 @@ namespace mongo {
                 problem() << "ERROR: failed to create collection while adding its index. " << sourceNS << endl;
                 return false;
             }
-            sourceCollection = nsdetails(sourceNS.c_str());
+            sourceCollection = nsdetails(sourceNS);
             tlog() << "info: creating collection " << sourceNS << " on add index" << endl;
             verify( sourceCollection );
         }
@@ -345,12 +353,6 @@ namespace mongo {
             log() << s << endl;
             uasserted(12505,s);
         }
-
-        /* we can't build a new index for the ns if a build is already in progress in the background -
-           EVEN IF this is a foreground build.
-           */
-        uassert(12588, "cannot add index with a background operation in progress",
-                !BackgroundOperation::inProgForNs(sourceNS.c_str()));
 
         /* this is because we want key patterns like { _id : 1 } and { _id : <someobjid> } to
            all be treated as the same pattern.

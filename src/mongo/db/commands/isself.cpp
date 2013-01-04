@@ -28,7 +28,6 @@
 #include "mongo/db/jsobj.h"
 #include "../../util/net/listen.h"
 #include "../commands.h"
-#include "../security.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/client/dbclientinterface.h"
 
@@ -108,7 +107,7 @@ namespace mongo {
         return out;
     }
 
-    vector<string> getAllIPs(StringData iporhost) {
+    vector<string> getAllIPs(const string& iporhost) {
         addrinfo* addrs = NULL;
         addrinfo hints;
         memset(&hints, 0, sizeof(addrinfo));
@@ -119,9 +118,9 @@ namespace mongo {
 
         vector<string> out;
 
-        int ret = getaddrinfo(iporhost.data(), portNum.c_str(), &hints, &addrs);
+        int ret = getaddrinfo(iporhost.c_str(), portNum.c_str(), &hints, &addrs);
         if ( ret ) {
-            warning() << "getaddrinfo(\"" << iporhost.data() << "\") failed: " << gai_strerror(ret) << endl;
+            warning() << "getaddrinfo(\"" << iporhost << "\") failed: " << gai_strerror(ret) << endl;
             return out;
         }
 
@@ -248,8 +247,6 @@ namespace mongo {
                 if (!conn.auth("local", internalSecurity.user, internalSecurity.pwd, errmsg, false)) {
                     return false;
                 }
-                conn.setAuthenticationTable(
-                        AuthenticationTable::getInternalSecurityAuthenticationTable() );
             }
 
             BSONObj out;

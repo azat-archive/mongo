@@ -18,7 +18,6 @@
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
-#include "mongo/client/dbclientinterface.h"
 #include "mongo/db/auth/auth_external_state.h"
 
 namespace mongo {
@@ -40,14 +39,13 @@ namespace mongo {
             _returnValue = returnValue;
         }
 
-        // This is a no-op for the mock
-        virtual Status initialize(DBClientBase* adminDBConnection) { return Status::OK(); }
-
-        virtual Status getPrivilegeDocument(const string& dbname,
-                                            const string& user,
-                                            BSONObj* result) {
-            return Status(ErrorCodes::InternalError, "Not Implemented!");
+        virtual bool _findUser(const std::string& usersNamespace,
+                               const BSONObj& query,
+                               BSONObj* result) const {
+            return false;
         }
+
+        virtual void startRequest() {}
 
     private:
         bool _returnValue;

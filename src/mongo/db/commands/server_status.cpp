@@ -18,7 +18,10 @@
 
 #include "mongo/pch.h"
 
-#include "mongo/db/client_common.h"
+#include "mongo/db/auth/action_set.h"
+#include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/privilege.h"
+#include "mongo/db/client_basic.h"
 #include "mongo/db/cmdline.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/server_status.h"
@@ -64,7 +67,13 @@ namespace mongo {
         virtual void help( stringstream& help ) const {
             help << "returns lots of administrative server statistics";
         }
-
+        virtual void addRequiredPrivileges(const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {
+            ActionSet actions;
+            actions.addAction(ActionType::serverStatus);
+            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+        }
         bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             
             _runCalled = true;
@@ -73,10 +82,7 @@ namespace mongo {
             BSONObjBuilder timeBuilder(256);
 
             const ClientBasic* myClientBasic = ClientBasic::getCurrent();
-            const bool isAdmin = 
-                myClientBasic && 
-                myClientBasic->getAuthenticationInfo() && 
-                myClientBasic->getAuthenticationInfo()->isAuthorizedReads("admin");
+            AuthorizationManager* authManager = myClientBasic->getAuthorizationManager();
             
             // --- basic fields that are global
 
@@ -96,7 +102,9 @@ namespace mongo {
             for ( SectionMap::const_iterator i = _sections->begin(); i != _sections->end(); ++i ) {
                 ServerStatusSection* section = i->second;
                 
-                if ( section->adminOnly() && ! isAdmin )
+                std::vector<Privilege> requiredPrivileges;
+                section->addRequiredPrivileges(&requiredPrivileges);
+                if (!authManager->checkAuthForPrivileges(requiredPrivileges).isOK())
                     continue;
 
                 bool include = section->includeByDefault();
@@ -109,7 +117,7 @@ namespace mongo {
                 if ( ! include )
                     continue;
                 
-                BSONObj data = section->generateSection( e, isAdmin );
+                BSONObj data = section->generateSection(e);
                 if ( data.isEmpty() )
                     continue;
 
@@ -119,8 +127,11 @@ namespace mongo {
             }
 
             // --- counters
-            
-            if ( MetricTree::theMetricTree ) {
+            bool includeMetricTree = MetricTree::theMetricTree != NULL;
+            if ( cmdObj["metrics"].type() && !cmdObj["metrics"].trueValue() )
+                includeMetricTree = false;
+
+            if ( includeMetricTree ) {
                 MetricTree::theMetricTree->appendTo( result );
             }
 
@@ -140,11 +151,6 @@ namespace mongo {
                     arr.done();
                 }
             }
-
-            // --- final admin things
-
-            if ( ! isAdmin )
-                result.append( "note" , "run against admin for more info" );
             
             timeBuilder.appendNumber( "at end" , Listener::getElapsedTimeMillis() - start );
             if ( Listener::getElapsedTimeMillis() - start > 1000 ) {
@@ -184,7 +190,7 @@ namespace mongo {
         : ServerStatusSection( sectionName ), _counters( counters ){
     }
 
-    BSONObj OpCounterServerStatusSection::generateSection( const BSONElement& configElement, bool userIsAdmin ) const {
+    BSONObj OpCounterServerStatusSection::generateSection(const BSONElement& configElement) const {
         return _counters->getObj();
     }
     
@@ -229,9 +235,8 @@ namespace mongo {
         }
     }
 
-    ServerStatusMetric::ServerStatusMetric( const string& nameIn, bool adminOnly ) 
+    ServerStatusMetric::ServerStatusMetric(const string& nameIn)
         : _name( nameIn ),
-          _adminOnly( adminOnly ),
           _leafName( _parseLeafName( nameIn ) ) {
         
         if ( MetricTree::theMetricTree == 0 )
@@ -255,9 +260,8 @@ namespace mongo {
         public:
             Connections() : ServerStatusSection( "connections" ){}
             virtual bool includeByDefault() const { return true; }
-            virtual bool adminOnly() const { return false; }
             
-            BSONObj generateSection( const BSONElement& configElement, bool userIsAdmin ) const {
+            BSONObj generateSection(const BSONElement& configElement) const {
                 BSONObjBuilder bb;
                 bb.append( "current" , Listener::globalTicketHolder.used() );
                 bb.append( "available" , Listener::globalTicketHolder.available() );
@@ -271,9 +275,8 @@ namespace mongo {
         public:
             ExtraInfo() : ServerStatusSection( "extra_info" ){}
             virtual bool includeByDefault() const { return true; }
-            virtual bool adminOnly() const { return false; }
             
-            BSONObj generateSection( const BSONElement& configElement, bool userIsAdmin ) const {
+            BSONObj generateSection(const BSONElement& configElement) const {
                 BSONObjBuilder bb;
                 
                 bb.append("note", "fields vary by platform");
@@ -289,9 +292,8 @@ namespace mongo {
         public:
             Asserts() : ServerStatusSection( "asserts" ){}
             virtual bool includeByDefault() const { return true; }
-            virtual bool adminOnly() const { return false; }
             
-            BSONObj generateSection( const BSONElement& configElement, bool userIsAdmin ) const {
+            BSONObj generateSection(const BSONElement& configElement) const {
                 BSONObjBuilder asserts;
                 asserts.append( "regular" , assertionCount.regular );
                 asserts.append( "warning" , assertionCount.warning );
@@ -308,9 +310,8 @@ namespace mongo {
         public:
             Network() : ServerStatusSection( "network" ){}
             virtual bool includeByDefault() const { return true; }
-            virtual bool adminOnly() const { return false; }
             
-            BSONObj generateSection( const BSONElement& configElement, bool userIsAdmin ) const {
+            BSONObj generateSection(const BSONElement& configElement) const {
                 BSONObjBuilder b;
                 networkCounter.append( b );
                 return b.obj();
@@ -320,7 +321,7 @@ namespace mongo {
 
         class MemBase : public ServerStatusMetric {
         public:
-            MemBase() : ServerStatusMetric( ".mem.bits", false ) {}
+            MemBase() : ServerStatusMetric(".mem.bits") {}
             virtual void appendAtLeaf( BSONObjBuilder& b ) const {
                 b.append( "bits", sizeof(int*) == 4 ? 32 : 64 );
 

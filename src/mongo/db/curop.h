@@ -39,7 +39,9 @@ namespace mongo {
         OpDebug() : ns(""){ reset(); }
 
         void reset();
-        
+
+        void recordStats();
+
         string report( const CurOp& curop ) const;
 
         /**
@@ -80,6 +82,8 @@ namespace mongo {
         bool scanAndOrder;   // scanandorder query plan aspect was used
         long long  nupdated; // number of records updated
         long long  nmoved;   // updates resulted in a move (moves are expensive)
+        long long  ninserted;
+        long long  ndeleted;
         bool fastmod;
         bool fastmodinsert;  // upsert of an $operation. builds a default object
         bool upsert;         // true if the update actually did an insert
@@ -217,9 +221,11 @@ namespace mongo {
         void setQuery(const BSONObj& query) { _query.set( query ); }
         Client * getClient() const { return _client; }
         BSONObj info();
-        BSONObj infoNoauth();
         string getRemoteString( bool includePort = true ) { return _remote.toString(includePort); }
-        ProgressMeter& setMessage( const char * msg , unsigned long long progressMeterTotal = 0 , int secondsBetween = 3 );
+        ProgressMeter& setMessage(const char * msg,
+                                  std::string name = "Progress",
+                                  unsigned long long progressMeterTotal = 0,
+                                  int secondsBetween = 3);
         string getMessage() const { return _message.toString(); }
         ProgressMeter& getProgressMeter() { return _progressMeter; }
         CurOp *parent() const { return _wrapped; }

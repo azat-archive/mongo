@@ -408,31 +408,6 @@ namespace QueryUtilTests {
             }
         };
 
-        class SimplifiedQuery {
-        public:
-            void run() {
-                FieldRangeSet frs( "ns",
-                                  BSON( "a" << GT << 1 << GT << 5 << LT << 10 <<
-                                       "b" << 4 <<
-                                       "c" << LT << 4 << LT << 6 <<
-                                       "d" << GTE << 0 << GT << 0 <<
-                                       "e" << GTE << 0 << LTE << 10 <<
-                                       "f" << NE << 9 ),
-                                  true, true );
-                BSONObj simple = frs.simplifiedQuery();
-                ASSERT_EQUALS( fromjson( "{$gt:5,$lt:10}" ), simple.getObjectField( "a" ) );
-                ASSERT_EQUALS( 4, simple.getIntField( "b" ) );
-                ASSERT_EQUALS( BSON("$gte" << -numeric_limits<double>::max() << "$lt" << 4 ),
-                              simple.getObjectField( "c" ) );
-                ASSERT_EQUALS( BSON("$gt" << 0 << "$lte" << numeric_limits<double>::max() ),
-                              simple.getObjectField( "d" ) );
-                ASSERT_EQUALS( fromjson( "{$gte:0,$lte:10}" ),
-                              simple.getObjectField( "e" ) );
-                ASSERT_EQUALS( BSON( "$gte" << MINKEY << "$lte" << MAXKEY ),
-                              simple.getObjectField( "f" ) );
-            }
-        };
-
         class QueryPatternBase {
         protected:
             static QueryPattern p( const BSONObj &query, const BSONObj &sort = BSONObj() ) {
@@ -1036,7 +1011,7 @@ namespace QueryUtilTests {
         class ElemMatchRegex {
         public:
             void run() {
-                FieldRangeSet frs( "", fromjson( "{a:{$elemMatch:{$regex:'^x'}}}" ), true, true );
+                FieldRangeSet frs( "", BSON( "a" << BSON( "$elemMatch" << BSON("$regex" << "^x") ) ), true, true );
                 ASSERT( !frs.range( "a" ).universal() );
                 ASSERT_EQUALS( "x", frs.range( "a" ).min().String() );
             }
@@ -1135,7 +1110,11 @@ namespace QueryUtilTests {
             };
 
             struct UntypedRegex : public NotExactMatchRepresentation {
-                UntypedRegex() : NotExactMatchRepresentation( fromjson( "{a:{$regex:/^a/}}" ) ) {}
+                UntypedRegex() : NotExactMatchRepresentation( BSON( "a" << BSONObjBuilder().appendRegex("$regex", "^a", "").obj() ) ) {}
+            };
+
+            struct UntypedRegexString : public NotExactMatchRepresentation {
+                UntypedRegexString() : NotExactMatchRepresentation( BSON( "a" << BSON( "$regex" << "^a" ) ) ) {}
             };
 
             struct NotIn : public NotExactMatchRepresentation {
@@ -1256,7 +1235,9 @@ namespace QueryUtilTests {
                 FieldRangeSet frs2( "", fromjson( "{a:1,b:5,c:{$in:[7,8]},d:{$in:[8,9]},e:10}" ),
                                     true, true );
                 frs1 &= frs2;
-                ASSERT_EQUALS( fromjson( "{a:1,b:5,c:7,d:{$gte:8,$lte:9},e:10}" ), frs1.simplifiedQuery( BSONObj() ) );
+                FieldRangeSet expectedResult( "", fromjson( "{a:1,b:5,c:7,d:{$in:[8,9]},e:10}" ),
+                                              true, true );
+                ASSERT_EQUALS( frs1.toString(), expectedResult.toString() );
             }
         };
         
@@ -1268,18 +1249,15 @@ namespace QueryUtilTests {
                 FieldRangeSet frs3( "", BSON( "a" << LT << 6 ), false, true );
                 // An intersection with a universal range is allowed.
                 frs1 &= frs2;
-                ASSERT_EQUALS( frs2.simplifiedQuery( BSONObj() ),
-                              frs1.simplifiedQuery( BSONObj() ) );
+                ASSERT_EQUALS( frs2.toString(), frs1.toString() );
                 // An intersection with non universal range is not allowed, as it might prevent a
                 // valid multikey match.
                 frs1 &= frs3;
-                ASSERT_EQUALS( frs2.simplifiedQuery( BSONObj() ),
-                              frs1.simplifiedQuery( BSONObj() ) );
+                ASSERT_EQUALS( frs2.toString(), frs1.toString() );
                 // Now intersect with a fully contained range.
                 FieldRangeSet frs4( "", BSON( "a" << GT << 6 ), false, true );
                 frs1 &= frs4;
-                ASSERT_EQUALS( frs4.simplifiedQuery( BSONObj() ),
-                              frs1.simplifiedQuery( BSONObj() ) );                
+                ASSERT_EQUALS( frs4.toString(), frs1.toString() );
             }
         };
 
@@ -1302,7 +1280,8 @@ namespace QueryUtilTests {
                 FieldRangeSet frs2( "", BSON( "a" << GT << 6 ), false, true );
                 // Range subtraction is no different for multikey ranges.
                 frs1 -= frs2;
-                ASSERT_EQUALS( BSON( "a" << GT << 4 << LTE << 6 ), frs1.simplifiedQuery( BSONObj() ) );
+                FieldRangeSet expectedResult( "", BSON( "a" << GT << 4 << LTE << 6 ), true, true );
+                ASSERT_EQUALS( frs1.toString(), expectedResult.toString() );
             }
         };
         
@@ -1558,9 +1537,13 @@ namespace QueryUtilTests {
             struct Regex : public NotExactMatchRepresentation {
                 Regex() : NotExactMatchRepresentation( fromjson( "{a:/^a/}" ) ) {}
             };
-            
+
             struct UntypedRegex : public NotExactMatchRepresentation {
-                UntypedRegex() : NotExactMatchRepresentation( fromjson( "{a:{$regex:'^a'}}" ) ) {}
+                UntypedRegex() : NotExactMatchRepresentation( BSON( "a" << BSONObjBuilder().appendRegex("$regex", "^a", "").obj() ) ) {}
+            };
+
+            struct UntypedRegexString : public NotExactMatchRepresentation {
+                UntypedRegexString() : NotExactMatchRepresentation( BSON( "a" << BSON( "$regex" << "^a" ) ) ) {}
             };
             
             struct And : public ExactMatchRepresentation {
@@ -2914,7 +2897,6 @@ namespace QueryUtilTests {
             add<FieldRangeTests::NonSingletonOr>();
             add<FieldRangeTests::Empty>();
             add<FieldRangeTests::Equality>();
-            add<FieldRangeTests::SimplifiedQuery>();
             add<FieldRangeTests::QueryPatternTest>();
             add<FieldRangeTests::QueryPatternEmpty>();
             add<FieldRangeTests::QueryPatternNeConstraint>();
@@ -3006,6 +2988,7 @@ namespace QueryUtilTests {
             add<FieldRangeTests::ExactMatchRepresentation::InNull>();
             add<FieldRangeTests::ExactMatchRepresentation::Exists>();
             add<FieldRangeTests::ExactMatchRepresentation::UntypedRegex>();
+            add<FieldRangeTests::ExactMatchRepresentation::UntypedRegexString>();
             add<FieldRangeTests::ExactMatchRepresentation::NotIn>();
             add<FieldRangeTests::ExactMatchRepresentation::NotGt>();
             add<FieldRangeTests::ExactMatchRepresentation::GtArray>();
@@ -3041,6 +3024,7 @@ namespace QueryUtilTests {
             add<FieldRangeSetTests::ExactMatchRepresentation::Not>();
             add<FieldRangeSetTests::ExactMatchRepresentation::Regex>();
             add<FieldRangeSetTests::ExactMatchRepresentation::UntypedRegex>();
+            add<FieldRangeSetTests::ExactMatchRepresentation::UntypedRegexString>();
             add<FieldRangeSetTests::ExactMatchRepresentation::And>();
             add<FieldRangeSetTests::ExactMatchRepresentation::Or>();
             add<FieldRangeSetTests::ExactMatchRepresentation::All>();

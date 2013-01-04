@@ -14,7 +14,7 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "mongo/db/geo/geojsonparser.h"
+#include "mongo/db/geo/geoparser.h"
 #include "third_party/s2/s2.h"
 #include "third_party/s2/s2regioncoverer.h"
 #include "third_party/s2/s2cell.h"
@@ -35,31 +35,31 @@ namespace mongo {
     };
 
     // Used for passing geo data from the newCursor entry point to the S2Cursor class.
-    struct GeoQueryField {
-        GeoQueryField(const string& f) : field(f), cell(NULL), line(NULL), polygon(NULL) { }
+    struct QueryGeometry {
+        QueryGeometry(const string& f) : field(f) {} //, cell(NULL), line(NULL), polygon(NULL) {}
 
         // Name of the field in the query.
         string field;
         // Only one of these should be non-NULL.  S2Region is a superclass but it only supports
         // testing against S2Cells.  We need the most specific class we can get.
         // Owned by S2Cursor.
-        S2Cell *cell;
-        S2Polyline *line;
-        S2Polygon *polygon;
+        shared_ptr<S2Cell> cell;
+        shared_ptr<S2Polyline> line;
+        shared_ptr<S2Polygon> polygon;
+
+        string toString() const;
         
-        // Does this GeoQueryField intersect the provided data?  Sadly there is no common good way
+        // Does this QueryGeometry intersect the provided data?  Sadly there is no common good way
         // to check this, so we do different things for all query/data pairs.
         bool intersectsPoint(const S2Cell& otherPoint);
         bool intersectsLine(const S2Polyline& otherLine);
         bool intersectsPolygon(const S2Polygon& otherPolygon);
         // One region is not NULL and this returns it.
         const S2Region& getRegion() const;
-        // Delete the not NULL region.
-        void free();
         // Get the centroid, boring if we're a point, interesting if we're not.
         S2Point getCentroid() const;
         // Try to parse the provided object into the right place.
-        bool parseFrom(BSONObj& obj);
+        bool parseFrom(const BSONObj &obj);
     };
 
     struct S2IndexingParams {
@@ -75,8 +75,7 @@ namespace mongo {
         // And, what's the coarsest?  When we search in larger coverings we know we
         // can stop here -- we index nothing coarser than this.
         int coarsestIndexedLevel;
-        // What is the radius of the sphere/earth we're using?  Not everybody likes giving 
-        // radians or degrees all the time.  In meters.
+
         double radius;
 
         string toString() const {
@@ -85,7 +84,6 @@ namespace mongo {
             ss << "maxCellsInCovering: " << maxCellsInCovering << endl;
             ss << "finestIndexedLevel: " << finestIndexedLevel << endl;
             ss << "coarsestIndexedLevel: " << coarsestIndexedLevel << endl;
-            ss << "radius: " << radius << endl;
             return ss.str();
         }
 

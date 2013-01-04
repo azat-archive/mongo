@@ -52,7 +52,7 @@ namespace mongo {
         virtual bool allowedToChangeAtRuntime() const { return true; }
 
 
-        virtual void append( BSONObjBuilder& b ) = 0;
+        virtual void append( BSONObjBuilder& b, const string& name ) = 0;
 
         virtual Status set( const BSONElement& newValueElement ) = 0;
 
@@ -83,8 +83,8 @@ namespace mongo {
             : ServerParameter( sps, name ), _value( value ) {}
         virtual ~ExportedServerParameter() {}
 
-        virtual void append( BSONObjBuilder& b ) {
-            b.append( name(), *_value );
+        virtual void append( BSONObjBuilder& b, const string& name ) {
+            b.append( name, *_value );
         }
 
         virtual Status set( const BSONElement& newValueElement );
@@ -103,7 +103,7 @@ namespace mongo {
 
 #define MONGO_EXPORT_SERVER_PARAMETER( NAME, TYPE, INITIAL_VALUE ) \
     TYPE NAME = INITIAL_VALUE; \
-    ExportedServerParameter<TYPE> _##NAME( ServerParameterSet::getGlobal(), #NAME, &NAME );
+    ExportedServerParameter<TYPE> _##NAME( ServerParameterSet::getGlobal(), #NAME, &NAME )
 
 }
 

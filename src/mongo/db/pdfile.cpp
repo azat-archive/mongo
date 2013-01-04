@@ -32,11 +32,12 @@ _ disallow system* manipulations from the database.
 #include <list>
 
 #include "mongo/base/counter.h"
+#include "mongo/db/auth/auth_index_d.h"
+#include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/pdfile_private.h"
 #include "mongo/db/background.h"
 #include "mongo/db/btree.h"
 #include "mongo/db/commands/server_status.h"
-#include "mongo/db/compact.h"
 #include "mongo/db/curop-inl.h"
 #include "mongo/db/db.h"
 #include "mongo/db/dbhelpers.h"
@@ -50,6 +51,7 @@ _ disallow system* manipulations from the database.
 #include "mongo/db/ops/delete.h"
 #include "mongo/db/repl.h"
 #include "mongo/db/replutil.h"
+#include "mongo/db/sort_phase_one.h"
 #include "mongo/util/file.h"
 #include "mongo/util/file_allocator.h"
 #include "mongo/util/hashtab.h"
@@ -64,12 +66,14 @@ namespace mongo {
     bool isValidNS( const StringData& ns ) {
         // TODO: should check for invalid characters
 
-        const char * x = strchr( ns.data() , '.' );
-        if ( ! x )
+        size_t idx = ns.find( '.' );
+        if ( idx == string::npos )
             return false;
 
-        x++;
-        return *x > 0;
+        if ( idx == ns.size() - 1 )
+            return false;
+
+        return true;
     }
 
     // TODO SERVER-4328
@@ -111,7 +115,6 @@ namespace mongo {
     BackgroundOperation::BackgroundOperation(const char *ns) : _ns(ns) {
         SimpleMutex::scoped_lock lk(m);
         dbsInProg[_ns.db]++;
-        verify( nsInProg.count(_ns.ns()) == 0 );
         nsInProg.insert(_ns.ns());
     }
 
@@ -159,6 +162,13 @@ namespace mongo {
                 strstr( ns, FREELIST_NS ) == 0 ) {
             LOG( 1 ) << "adding _id index for collection " << ns << endl;
             ensureHaveIdIndex( ns, false );
+        }
+    }
+
+    static void _ensureSystemIndexes(const char* ns) {
+        NamespaceString nsstring(ns);
+        if (StringData(nsstring.coll).substr(0, 7) == "system.") {
+            authindex::createSystemIndexes(nsstring);
         }
     }
 
@@ -220,8 +230,10 @@ namespace mongo {
     }
 
     void checkConfigNS(const char *ns) {
-        if ( cmdLine.configsvr && 
-             !( str::startsWith( ns, "config." ) || str::startsWith( ns, "admin." ) ) ) { 
+        if ( cmdLine.configsvr &&
+             !( str::startsWith( ns, "config." ) ||
+                str::startsWith( ns, "local." ) ||
+                str::startsWith( ns, "admin." ) ) ) {
             uasserted(14037, "can't create user databases on a --configsvr instance");
         }
     }
@@ -315,7 +327,7 @@ namespace mongo {
         // capped ones in local w/o autoIndexID (reason for the exception is for the oplog and
         //  non-replicated capped colls)
         if( options.hasField( "autoIndexId" ) ||
-            (newCapped && str::equals( nsToDatabase( ns ).c_str() ,  "local" )) ) {
+            (newCapped && nsToDatabase( ns ) == "local" ) ) {
             ensure = options.getField( "autoIndexId" ).trueValue();
         }
 
@@ -325,7 +337,9 @@ namespace mongo {
             else
                 ensureIdIndexForNewNs( ns );
         }
-        
+
+        _ensureSystemIndexes(ns);
+
         if ( mx > 0 )
             d->setMaxCappedDocs( mx );
 
@@ -347,8 +361,6 @@ namespace mongo {
     bool userCreateNS(const char *ns, BSONObj options, string& err, bool logForReplication, bool *deferIdIndex) {
         const char *coll = strchr( ns, '.' ) + 1;
         massert( 10356 ,  str::stream() << "invalid ns: " << ns , NamespaceString::validCollectionName(ns));
-        char cl[ 256 ];
-        nsToDatabase( ns, cl );
         bool ok = _userCreateNS(ns, options, err, deferIdIndex);
         if ( logForReplication && ok ) {
             if ( options.getField( "create" ).eoo() ) {
@@ -357,7 +369,7 @@ namespace mongo {
                 b.appendElements( options );
                 options = b.obj();
             }
-            string logNs = string( cl ) + ".$cmd";
+            string logNs = nsToDatabase(ns) + ".$cmd";
             logOp("c", logNs.c_str(), options);
         }
         return ok;
@@ -540,7 +552,7 @@ namespace mongo {
 
     Extent* DataFileMgr::allocFromFreeList(const char *ns, int approxSize, bool capped) {
         string s = cc().database()->name + FREELIST_NS;
-        NamespaceDetails *f = nsdetails(s.c_str());
+        NamespaceDetails *f = nsdetails(s);
         if( f ) {
             int low, high;
             if( capped ) {
@@ -806,7 +818,18 @@ namespace mongo {
 
     /*---------------------------------------------------------------------*/
 
-    shared_ptr<Cursor> DataFileMgr::findAll(const char *ns, const DiskLoc &startLoc) {
+    DataFileMgr::DataFileMgr() : _precalcedMutex("PrecalcedMutex"), _precalced(NULL) {
+    }
+
+    SortPhaseOne* DataFileMgr::getPrecalced() const {
+        return _precalced;
+    }
+
+    void DataFileMgr::setPrecalced(SortPhaseOne* precalced) {
+        _precalced = precalced;
+    }
+
+    shared_ptr<Cursor> DataFileMgr::findAll(const StringData& ns, const DiskLoc &startLoc) {
         NamespaceDetails * d = nsdetails( ns );
         if ( ! d )
             return shared_ptr<Cursor>(new BasicCursor(DiskLoc()));
@@ -884,7 +907,7 @@ namespace mongo {
     void printFreeList() {
         string s = cc().database()->name + FREELIST_NS;
         log() << "dump freelist " << s << endl;
-        NamespaceDetails *freeExtents = nsdetails(s.c_str());
+        NamespaceDetails *freeExtents = nsdetails(s);
         if( freeExtents == 0 ) {
             log() << "  freeExtents==0" << endl;
             return;
@@ -914,11 +937,11 @@ namespace mongo {
         }
 
         string s = cc().database()->name + FREELIST_NS;
-        NamespaceDetails *freeExtents = nsdetails(s.c_str());
+        NamespaceDetails *freeExtents = nsdetails(s);
         if( freeExtents == 0 ) {
             string err;
             _userCreateNS(s.c_str(), BSONObj(), err, 0); // todo: this actually allocates an extent, which is bad!
-            freeExtents = nsdetails(s.c_str());
+            freeExtents = nsdetails(s);
             massert( 10361 , "can't create .$freelist", freeExtents);
         }
         if( freeExtents->firstExtent.isNull() ) {
@@ -938,7 +961,7 @@ namespace mongo {
 
     /* drop a collection/namespace */
     void dropNS(const string& nsToDrop) {
-        NamespaceDetails* d = nsdetails(nsToDrop.c_str());
+        NamespaceDetails* d = nsdetails(nsToDrop);
         uassert( 10086 ,  (string)"ns not found: " + nsToDrop , d );
 
         BackgroundOperation::assertNoBgOpInProgForNs(nsToDrop.c_str());
@@ -946,10 +969,14 @@ namespace mongo {
         NamespaceString s(nsToDrop);
         verify( s.db == cc().database()->name );
         if( s.isSystem() ) {
-            if( s.coll == "system.profile" )
-                uassert( 10087 ,  "turn off profiling before dropping system.profile collection", cc().database()->profile == 0 );
-            else
+            if( s.coll == "system.profile" ) {
+                uassert( 10087,
+                         "turn off profiling before dropping system.profile collection",
+                         cc().database()->getProfilingLevel() == 0 );
+            }
+            else {
                 uasserted( 12502, "can't drop system ns" );
+            }
         }
 
         {
@@ -973,7 +1000,7 @@ namespace mongo {
 
     void dropCollection( const string &name, string &errmsg, BSONObjBuilder &result ) {
         LOG(1) << "dropCollection: " << name << endl;
-        NamespaceDetails *d = nsdetails(name.c_str());
+        NamespaceDetails *d = nsdetails(name);
         if( d == 0 )
             return;
 
@@ -1090,7 +1117,7 @@ namespace mongo {
     }
 
     Counter64 moveCounter;
-    ServerStatusMetricField<Counter64> moveCounterDisplay( "record.moves", false, &moveCounter );
+    ServerStatusMetricField<Counter64> moveCounterDisplay( "record.moves", &moveCounter );
 
     /** Note: if the object shrinks a lot, we don't free up space, we leave extra at end of the record.
      */
@@ -1119,6 +1146,11 @@ namespace mongo {
             b.append(e); // put _id first, for best performance
             b.appendElements(objNew);
             objNew = b.obj();
+        }
+
+        NamespaceString nsstring(ns);
+        if (nsstring.coll == "system.users") {
+            uassertStatusOK(AuthorizationManager::checkValidPrivilegeDocument(nsstring.db, objNew));
         }
 
         /* duplicate key check. we descend the btree twice - once for this check, and once for the actual inserts, further
@@ -1152,7 +1184,7 @@ namespace mongo {
         /* have any index keys changed? */
         {
             int keyUpdates = 0;
-            int z = d->nIndexesBeingBuilt();
+            int z = d->getTotalIndexCount();
             for ( int x = 0; x < z; x++ ) {
                 IndexDetails& idx = d->idx(x);
                 IndexInterface& ii = idx.idxInterface();
@@ -1359,10 +1391,8 @@ namespace mongo {
             else if ( legalClientSystemNS( ns , true ) ) {
                 if ( obuf && strstr( ns , ".system.users" ) ) {
                     BSONObj t( reinterpret_cast<const char *>( obuf ) );
-                    uassert( 14051 , "system.users entry needs 'user' field to be a string" , t["user"].type() == String );
-                    uassert( 14052 , "system.users entry needs 'pwd' field to be a string" , t["pwd"].type() == String );
-                    uassert( 14053 , "system.users entry needs 'user' field to be non-empty" , t["user"].String().size() );
-                    uassert( 14054 , "system.users entry needs 'pwd' field to be non-empty" , t["pwd"].String().size() );
+                    uassertStatusOK(AuthorizationManager::checkValidPrivilegeDocument(
+                                            nsToDatabaseSubstring(ns), t));
                 }
             }
             else if ( !god ) {
@@ -1386,6 +1416,7 @@ namespace mongo {
         NamespaceDetails *d = nsdetails(ns);
         if ( !god )
             ensureIdIndexForNewNs(ns);
+        _ensureSystemIndexes(ns);
         addNewNamespaceToCatalog(ns);
         return d;
     }
@@ -1406,7 +1437,17 @@ namespace mongo {
             background = false;
         }
 
-        int idxNo = tableToIndex->nIndexes;
+        // The total number of indexes right before we write to the collection
+        int oldNIndexes = -1;
+        int idxNo = tableToIndex->getTotalIndexCount();
+        std::string idxName = info["name"].valuestr();
+
+        // Set curop description before setting indexBuildInProg, so that there's something
+        // commands can find and kill as soon as indexBuildInProg is set. Only set this if it's a
+        // killable index, so we don't overwrite commands in currentOp.
+        if (mayInterrupt) {
+            cc().curop()->setQuery(info);
+        }
 
         try {
             IndexDetails& idx = tableToIndex->getNextIndexDetails(tabletoidxns.c_str());
@@ -1415,8 +1456,8 @@ namespace mongo {
             getDur().writingDiskLoc(idx.info) = loc;
 
             try {
-                getDur().writingInt(tableToIndex->indexBuildInProgress) = 1;
-                buildAnIndex(tabletoidxns, tableToIndex, idx, idxNo, background, mayInterrupt);
+                getDur().writingInt(tableToIndex->indexBuildsInProgress) += 1;
+                buildAnIndex(tabletoidxns, tableToIndex, idx, background, mayInterrupt);
             }
             catch (DBException& e) {
                 // save our error msg string as an exception or dropIndexes will overwrite our message
@@ -1432,6 +1473,8 @@ namespace mongo {
                     saveerrmsg = e.what();
                 }
 
+                // Recalculate the index # so we can remove it from the list in the next catch
+                idxNo = IndexBuildsInProgress::get(tabletoidxns.c_str(), idxName);
                 // roll back this index
                 idx.kill_idx();
 
@@ -1440,9 +1483,39 @@ namespace mongo {
                 throw;
             }
 
+            // Recompute index numbers
+            tableToIndex = nsdetails(tabletoidxns);
+            idxNo = IndexBuildsInProgress::get(tabletoidxns.c_str(), idxName);
+            verify(idxNo > -1);
+
+            // Make sure the newly created index is relocated to nIndexes, if it isn't already there
+            if (idxNo != tableToIndex->nIndexes) {
+                log() << "switching indexes at position " << idxNo << " and "
+                      << tableToIndex->nIndexes << endl;
+                // We cannot use idx here, as it may point to a different index entry if it was
+                // flipped during building
+                IndexDetails temp = tableToIndex->idx(idxNo);
+                *getDur().writing(&tableToIndex->idx(idxNo)) =
+                    tableToIndex->idx(tableToIndex->nIndexes);
+                *getDur().writing(&tableToIndex->idx(tableToIndex->nIndexes)) = temp;
+
+                // We also have to flip multikey entries
+                bool tempMultikey = tableToIndex->isMultikey(idxNo);
+                tableToIndex->setIndexIsMultikey(tabletoidxns.c_str(), idxNo,
+                                                 tableToIndex->isMultikey(tableToIndex->nIndexes));
+                tableToIndex->setIndexIsMultikey(tabletoidxns.c_str(), tableToIndex->nIndexes,
+                                                 tempMultikey);
+
+                idxNo = tableToIndex->nIndexes;
+            }
+
+            // Store the current total of indexes in case something goes wrong actually adding the
+            // index
+            oldNIndexes = tableToIndex->getTotalIndexCount();
+
             // clear transient info caches so they refresh; increments nIndexes
             tableToIndex->addIndex(tabletoidxns.c_str());
-            getDur().writingInt(tableToIndex->indexBuildInProgress) = 0;
+            getDur().writingInt(tableToIndex->indexBuildsInProgress) -= 1;
         }
         catch (...) {
             // Generally, this will be called as an exception from building the index bubbles up.
@@ -1451,15 +1524,48 @@ namespace mongo {
             // successfully finished building and addIndex or kill_idx threw.
 
             // Check if nIndexes was incremented
-            if (idxNo < tableToIndex->nIndexes) {
-                // TODO: this will have to change when we can have multiple simultanious index
-                // builds
-                getDur().writingInt(tableToIndex->nIndexes) -= 1;
+            if (oldNIndexes != -1 && oldNIndexes != tableToIndex->nIndexes) {
+                getDur().writingInt(tableToIndex->nIndexes) = oldNIndexes;
             }
 
-            getDur().writingInt(tableToIndex->indexBuildInProgress) = 0;
+            // Move any other in prog indexes "back" one. It is important that idxNo is set
+            // correctly so that the correct index is removed
+            IndexBuildsInProgress::remove(tabletoidxns.c_str(), idxNo);
+            getDur().writingInt(tableToIndex->indexBuildsInProgress) -= 1;
 
             throw;
+        }
+    }
+
+    // indexName is passed in because index details may not be pointing to something valid at this
+    // point
+    int IndexBuildsInProgress::get(const char* ns, const std::string& indexName) {
+        Lock::assertWriteLocked(ns);
+        NamespaceDetails* nsd = nsdetails(ns);
+
+        // Go through unfinished index builds and try to find this index
+        for (int i=nsd->nIndexes; i<nsd->nIndexes+nsd->indexBuildsInProgress; i++) {
+            if (indexName == nsd->idx(i).indexName()) {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    void IndexBuildsInProgress::remove(const char* ns, int offset) {
+        Lock::assertWriteLocked(ns);
+        NamespaceDetails* nsd = nsdetails(ns);
+
+        for (int i=offset; i<nsd->getTotalIndexCount(); i++) {
+            if (i < NamespaceDetails::NIndexesMax-1) {
+                *getDur().writing(&nsd->idx(i)) = nsd->idx(i+1);
+                nsd->setIndexIsMultikey(ns, i, nsd->isMultikey(i+1));
+            }
+            else {
+                *getDur().writing(&nsd->idx(i)) = IndexDetails();
+                nsd->setIndexIsMultikey(ns, i, false);
+            }
         }
     }
 
@@ -1517,8 +1623,11 @@ namespace mongo {
             BSONElement idField = io.getField( "_id" );
             uassert( 10099 ,  "_id cannot be an array", idField.type() != Array );
             // we don't add _id for capped collections in local as they don't have an _id index
-            if( idField.eoo() && !wouldAddIndex &&
-                !str::equals( nsToDatabase( ns ).c_str() , "local" ) && d->haveIdIndex() ) {
+            if( idField.eoo() &&
+                !wouldAddIndex &&
+                nsToDatabase( ns ) != "local" &&
+                d->haveIdIndex() ) {
+
                 if( addedID )
                     *addedID = true;
                 addID = len;
@@ -1653,6 +1762,12 @@ namespace mongo {
         verify( d );
         RARELY verify( d == nsdetails(ns) );
         DEV verify( d == nsdetails(ns) );
+
+        massert( 16509,
+                 str::stream()
+                 << "fast_oplog_insert requires a capped collection "
+                 << " but " << ns << " is not capped",
+                 d->isCapped() );
 
         int lenWHdr = len + Record::HeaderSize;
         DiskLoc loc = d->alloc(ns, lenWHdr);
@@ -1875,9 +1990,11 @@ namespace mongo {
             Client::Context ctx( dbName, reservedPathString );
             verify( ctx.justCreated() );
 
-            res = cloneFrom(localhost.c_str(), errmsg, dbName,
-                            /*logForReplication=*/false, /*slaveOk*/false, /*replauth*/false,
-                            /*snapshot*/false, /*mayYield*/false, /*mayBeInterrupted*/true);
+            res = Cloner::cloneFrom(localhost.c_str(), errmsg, dbName,
+                                    /*logForReplication=*/false, /*slaveOk*/false,
+                                    /*replauth*/false, /*snapshot*/false, /*mayYield*/false,
+                                    /*mayBeInterrupted*/true);
+ 
             Database::closeDatabase( dbName, reservedPathString.c_str() );
         }
 

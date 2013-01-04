@@ -28,23 +28,27 @@ namespace mongo {
     using namespace mongoutils;
 
     Position DocumentStorage::findField(StringData requested) const {
+        int reqSize = requested.size(); // get size calculation out of the way if needed
+
         if (_numFields >= HASH_TAB_MIN) { // hash lookup
             const unsigned bucket = bucketForKey(requested);
 
             Position pos = _hashTab[bucket];
             while (pos.found()) {
                 const ValueElement& elem = getField(pos);
-                if (str::equals(requested.data(), elem.name))
+                if (elem.nameLen == reqSize
+                    && memcmp(requested.rawData(), elem._name, reqSize) == 0) {
                     return pos;
+                }
 
                 // possible collision
                 pos = elem.nextCollision;
             }
         }
-        else if (_numFields) { // linear scan
+        else { // linear scan
             for (DocumentStorageIterator it = iteratorAll(); !it.atEnd(); it.advance()) {
-                if (size_t(it->nameLen) == requested.size()
-                    && str::equals(it->name, requested.data())) {
+                if (it->nameLen == reqSize
+                    && memcmp(requested.rawData(), it->_name, reqSize) == 0) {
                     return it.position();
                 }
             }
@@ -74,7 +78,7 @@ namespace mongo {
         append(value);
         append(nextCollision);
         append(nameSize);
-        memcpy(dest, name.data(), nameSize + 1/*NUL*/);
+        name.copyTo( dest, true );
         // Padding for alignment handled above
 #undef append
 
@@ -208,9 +212,16 @@ namespace mongo {
         *this = md.freeze();
     }
 
+    BSONObjBuilder& operator << (BSONObjBuilderValueStream& builder, const Document& doc) {
+        BSONObjBuilder subobj(builder.subobjStart());
+        doc.toBson(&subobj);
+        subobj.doneFast();
+        return builder.builder();
+    }
+
     void Document::toBson(BSONObjBuilder* pBuilder) const {
         for (DocumentStorageIterator it = storage().iterator(); !it.atEnd(); it.advance()) {
-            it->val.addToBsonObj(pBuilder, it->nameSD());
+            *pBuilder << it->nameSD() << it->val;
         }
     }
 
@@ -223,30 +234,42 @@ namespace mongo {
         }
     }
 
-    MutableValue MutableDocument::getNestedFieldHelper(MutableDocument& md,
-                                                       const vector<Position>& positions,
+    MutableValue MutableDocument::getNestedFieldHelper(const FieldPath& dottedField,
                                                        size_t level) {
-        fassert(16488, !positions.empty());
-
-        if (level == positions.size()-1) {
-            return md[positions[level]];
+        if (level == dottedField.getPathLength()-1) {
+            return getField(dottedField.getFieldName(level));
         }
         else {
-            MutableDocument nested (md[positions[level]]);
-            return getNestedFieldHelper(nested, positions, level+1);
+            MutableDocument nested (getField(dottedField.getFieldName(level)));
+            return nested.getNestedFieldHelper(dottedField, level+1);
+        }
+    }
+
+    MutableValue MutableDocument::getNestedField(const FieldPath& dottedField) {
+        fassert(16601, dottedField.getPathLength());
+        return getNestedFieldHelper(dottedField, 0);
+    }
+
+    MutableValue MutableDocument::getNestedFieldHelper(const vector<Position>& positions,
+                                                       size_t level) {
+        if (level == positions.size()-1) {
+            return getField(positions[level]);
+        }
+        else {
+            MutableDocument nested (getField(positions[level]));
+            return nested.getNestedFieldHelper(positions, level+1);
         }
     }
 
     MutableValue MutableDocument::getNestedField(const vector<Position>& positions) {
-        return getNestedFieldHelper(*this, positions, 0);
+        fassert(16488, !positions.empty());
+        return getNestedFieldHelper(positions, 0);
     }
 
     static Value getNestedFieldHelper(const Document& doc,
                                       const FieldPath& fieldNames,
                                       vector<Position>* positions,
                                       size_t level) {
-
-        fassert(16489, fieldNames.getPathLength());
 
         const string& fieldName = fieldNames.getFieldName(level);
         const Position pos = doc.positionOf(fieldName);
@@ -269,6 +292,7 @@ namespace mongo {
 
     const Value Document::getNestedField(const FieldPath& fieldNames,
                                          vector<Position>* positions) const {
+        fassert(16489, fieldNames.getPathLength());
         return getNestedFieldHelper(*this, fieldNames, positions, 0);
     }
 
@@ -290,42 +314,39 @@ namespace mongo {
     void Document::hash_combine(size_t &seed) const {
         for (DocumentStorageIterator it = storage().iterator(); !it.atEnd(); it.advance()) {
             StringData name = it->nameSD();
-            boost::hash_range(seed, name.data(), name.data()+name.size());
+            boost::hash_range(seed, name.rawData(), name.rawData() + name.size());
             it->val.hash_combine(seed);
         }
     }
 
     int Document::compare(const Document& rL, const Document& rR) {
-        const size_t lSize = rL->storage().size();
-        const size_t rSize = rR->storage().size();
-
         DocumentStorageIterator lIt = rL.storage().iterator();
         DocumentStorageIterator rIt = rR.storage().iterator();
 
-        for(size_t i = 0; true; ++i) {
-            if (i >= lSize) {
-                if (i >= rSize)
+        while (true) {
+            if (lIt.atEnd()) {
+                if (rIt.atEnd())
                     return 0; // documents are the same length
 
                 return -1; // left document is shorter
             }
 
-            if (i >= rSize)
+            if (rIt.atEnd())
                 return 1; // right document is shorter
 
             const ValueElement& rField = rIt.get();
             const ValueElement& lField = lIt.get();
 
-            rIt.advance();
-            lIt.advance();
-
-            const int nameCmp = strcmp(lField.name, rField.name);
+            const int nameCmp = lField.nameSD().compare(rField.nameSD());
             if (nameCmp)
                 return nameCmp; // field names are unequal
 
             const int valueCmp = Value::compare(lField.val, rField.val);
             if (valueCmp)
                 return valueCmp; // fields are unequal
+
+            rIt.advance();
+            lIt.advance();
         }
     }
 
@@ -337,7 +358,7 @@ namespace mongo {
         const char* prefix = "{";
 
         for (DocumentStorageIterator it = storage().iterator(); !it.atEnd(); it.advance()) {
-            out << prefix << it->name << ": " << it->val.toString();
+            out << prefix << it->nameSD() << ": " << it->val.toString();
             prefix = ", ";
         }
         out << '}';

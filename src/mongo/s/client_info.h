@@ -19,8 +19,7 @@
 
 #include "mongo/pch.h"
 
-#include "mongo/db/client_common.h"
-#include "mongo/db/security.h"
+#include "mongo/db/client_basic.h"
 #include "mongo/s/chunk.h"
 #include "mongo/s/writeback_listener.h"
 #include "mongo/util/net/hostandport.h"
@@ -109,21 +108,19 @@ namespace mongo {
         static ClientInfo * get(AbstractMessagingPort* messagingPort = NULL);
         // Creates a ClientInfo and stores it in _tlInfo
         static ClientInfo* create(AbstractMessagingPort* messagingPort);
-        const AuthenticationInfo* getAuthenticationInfo() const { return (AuthenticationInfo*)&_ai; }
-        AuthenticationInfo* getAuthenticationInfo() { return (AuthenticationInfo*)&_ai; }
-        bool isAdmin() { return _ai.isAuthorized( "admin" ); }
 
     private:
-        AuthenticationInfo _ai;
         struct WBInfo {
-            WBInfo( const WriteBackListener::ConnectionIdent& c , OID o ) : ident( c ) , id( o ) {}
+            WBInfo( const WriteBackListener::ConnectionIdent& c, OID o, bool fromLastOperation )
+                : ident( c ), id( o ), fromLastOperation( fromLastOperation ) {}
             WriteBackListener::ConnectionIdent ident;
             OID id;
+            bool fromLastOperation;
         };
 
         // for getLastError
-        void _addWriteBack( vector<WBInfo>& all , const BSONObj& o );
-        vector<BSONObj> _handleWriteBacks( vector<WBInfo>& all , bool fromWriteBackListener );
+        void _addWriteBack( vector<WBInfo>& all , const BSONObj& o, bool fromLastOperation );
+        vector<BSONObj> _handleWriteBacks( const vector<WBInfo>& all , bool fromWriteBackListener );
 
 
         int _id; // unique client id

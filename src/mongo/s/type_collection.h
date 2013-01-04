@@ -43,6 +43,10 @@ namespace mongo {
      *     if (! coll.isValid()) {
      *         // Can't use 'coll'. Take action.
      *     }
+     *     if (coll.isDropped()) {
+     *         // Coll doesn't exist, Take action.
+     *     }
+     *
      *     // use 'coll'
      *
      */
@@ -62,14 +66,15 @@ namespace mongo {
         static BSONField<std::string> primary; // primary db when not sharded
         static BSONField<BSONObj> keyPattern;  // sharding key, if sharded
         static BSONField<bool> unique;         // sharding key unique?
-        static BSONField<Date_t> createdAt;    // when collection was created
+        static BSONField<Date_t> updatedAt;    // when collection was created
         static BSONField<bool> noBalance;      // true if balancing is disabled
         static BSONField<OID> epoch;           // disambiguate ns (drop/recreate)
+        // To-be-deprecated, not yet
+        static BSONField<bool> dropped;        // true if we should ignore this collection entry
 
         // Deprecated fields should only be used in parseBSON calls. Exposed here for testing only.
         static BSONField<OID> DEPRECATED_lastmodEpoch;
         static BSONField<Date_t> DEPRECATED_lastmod;
-        static BSONField<bool> DEPRECATED_dropped;
 
         //
         // collection type methods
@@ -91,9 +96,9 @@ namespace mongo {
 
         /**
          * Clears and populates the internal state using the 'source' BSON object if the
-         * latter contains valid values. Otherwise clear the internal state.
+         * latter contains valid values. Otherwise sets errMsg and returns false.
          */
-        void parseBSON(BSONObj source);
+        bool parseBSON(BSONObj source, std::string* errMsg);
 
         /**
          * Clears the internal state.
@@ -103,7 +108,7 @@ namespace mongo {
         /**
          * Copies all the fields present in 'this' to 'other'.
          */
-        void cloneTo(CollectionType* other);
+        void cloneTo(CollectionType* other) const;
 
         /**
          * Returns a string representation of the current internal state.
@@ -114,20 +119,20 @@ namespace mongo {
         // individual field accessors
         //
 
-        void setNS(const StringData& ns) { _ns = std::string(ns.data(), ns.size()); }
+        void setNS(const StringData& ns) { _ns = ns.toString(); }
         const std::string& getNS() const { return _ns; }
 
-        void setPrimary(const StringData& name) { _primary=std::string(name.data(), name.size()); }
+        void setPrimary(const StringData& name) { _primary = name.toString(); }
         const std::string& getPrimary() const { return _primary; }
 
         void setKeyPattern(const BSONObj keyPattern) { _keyPattern = keyPattern.getOwned(); }
         BSONObj getKeyPattern() const { return _keyPattern; }
 
         void setUnique(bool unique) { _unique = unique; }
-        bool getUnique() const { return _unique; }
+        bool isUnique() const { return _unique; }
 
-        void setCreatedAt(const Date_t& time) { _createdAt = time; }
-        Date_t getCreatedAt() const { return _createdAt; }
+        void setUpdatedAt(const Date_t& time) { _updatedAt = time; }
+        Date_t getUpdatedAt() const { return _updatedAt; }
 
         void setNoBalance(bool noBalance) { _noBalance = noBalance; }
         bool getNoBalance() const { return _noBalance; }
@@ -135,16 +140,19 @@ namespace mongo {
         void setEpoch(OID oid) { _epoch = oid; }
         OID getEpoch() const { return _epoch; }
 
+        void setDropped(bool dropped) { _dropped = dropped; }
+        bool isDropped() const { return _dropped; }
+
     private:
         // Convention: (M)andatory, (O)ptional, (S)pecial rule.
         std::string _ns;       // (M) namespace
         std::string _primary;  // (S) either/or with _keyPattern
         BSONObj _keyPattern;   // (S) sharding pattern if sharded
         bool _unique;          // (S) mandatory if sharded, index is unique
-        Date_t _createdAt;     // (M) creation time
+        Date_t _updatedAt;     // (M) last updated time
         bool _noBalance;       // (S) optional if sharded, disable balancing
         OID _epoch;            // (M) disambiguates collection incarnations
-
+        bool _dropped;         // (O) if true, ignore this entry
     };
 
 } // namespace mongo

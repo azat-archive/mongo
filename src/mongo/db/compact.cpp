@@ -20,8 +20,6 @@
 
 #include "pch.h"
 
-#include "mongo/db/compact.h"
-
 #include <string>
 #include <vector>
 
@@ -39,6 +37,7 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/kill_current_op.h"
 #include "mongo/db/pdfile.h"
+#include "mongo/db/sort_phase_one.h"
 #include "mongo/util/concurrency/task.h"
 #include "mongo/util/timer.h"
 #include "mongo/util/touch_pages.h"
@@ -186,8 +185,6 @@ namespace mongo {
         return skipped;
     }
 
-    extern SortPhaseOne *precalced;
-
     bool _compact(const char *ns, NamespaceDetails *d, string& errmsg, bool validate, BSONObjBuilder& result, double pf, int pb) { 
         // this is a big job, so might as well make things tidy before we start just to be nice.
         getDur().commitIfNeeded();
@@ -197,7 +194,9 @@ namespace mongo {
             extents.push_back(L);
         log() << "compact " << extents.size() << " extents" << endl;
 
-        ProgressMeterHolder pm( cc().curop()->setMessage( "compact extent" , extents.size() ) );
+        ProgressMeterHolder pm(cc().curop()->setMessage("compact extent",
+                                                        "Extent Compating Progress",
+                                                        extents.size()));
 
         // same data, but might perform a little different after compact?
         NamespaceDetailsTransient::get(ns).clearQueryCache();
@@ -296,15 +295,16 @@ namespace mongo {
             killCurrentOp.checkForInterrupt(false);
             BSONObj info = indexSpecs[i].info;
             log() << "compact create index " << info["key"].Obj().toString() << endl;
+            scoped_lock precalcLock(theDataFileMgr._precalcedMutex);
             try {
-                precalced = &phase1[i];
+                theDataFileMgr.setPrecalced(&phase1[i]);
                 theDataFileMgr.insert(si.c_str(), info.objdata(), info.objsize());
             }
-            catch(...) { 
-                precalced = 0;
+            catch(...) {
+                theDataFileMgr.setPrecalced(NULL);
                 throw;
             }
-            precalced = 0;
+            theDataFileMgr.setPrecalced(NULL);
         }
 
         return true;
@@ -319,7 +319,7 @@ namespace mongo {
             Lock::DBWrite lk(ns);
             BackgroundOperation::assertNoBgOpInProgForNs(ns.c_str());
             Client::Context ctx(ns);
-            NamespaceDetails *d = nsdetails(ns.c_str());
+            NamespaceDetails *d = nsdetails(ns);
             massert( 13660, str::stream() << "namespace " << ns << " does not exist", d );
             massert( 13661, "cannot compact capped collection", !d->isCapped() );
             log() << "compact " << ns << " begin" << endl;
@@ -392,7 +392,7 @@ namespace mongo {
             {
                 Lock::DBWrite lk(ns);
                 Client::Context ctx(ns);
-                NamespaceDetails *d = nsdetails(ns.c_str());
+                NamespaceDetails *d = nsdetails(ns);
                 if( ! d ) {
                     errmsg = "namespace does not exist";
                     return false;

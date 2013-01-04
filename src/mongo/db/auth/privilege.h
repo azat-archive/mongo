@@ -29,7 +29,8 @@ namespace mongo {
     class Privilege {
     public:
 
-        Privilege(const std::string& resource, ActionSet actions);
+        Privilege(const std::string& resource, const ActionType& action);
+        Privilege(const std::string& resource, const ActionSet& actions);
         ~Privilege() {}
 
         const std::string& getResource() const { return _resource; }
@@ -38,6 +39,8 @@ namespace mongo {
 
         // Checks if the given action is present in the Privilege.
         bool includesAction(const ActionType& action) const;
+        // Checks if the given actions are present in the Privilege.
+        bool includesActions(const ActionSet& actions) const;
 
     private:
 

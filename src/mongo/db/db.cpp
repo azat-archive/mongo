@@ -27,7 +27,6 @@
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/cmdline.h"
 #include "mongo/db/commands/server_status.h"
-#include "mongo/db/commands/fail_point_cmd.h"
 #include "mongo/db/d_concurrency.h"
 #include "mongo/db/d_globals.h"
 #include "mongo/db/db.h"
@@ -52,6 +51,7 @@
 #include "mongo/scripting/engine.h"
 #include "mongo/util/background.h"
 #include "mongo/util/concurrency/task.h"
+#include "mongo/util/exception_filter_win32.h"
 #include "mongo/util/file_allocator.h"
 #include "mongo/util/net/message_server.h"
 #include "mongo/util/ntservice.h"
@@ -61,9 +61,7 @@
 #include "mongo/util/text.h"
 #include "mongo/util/version.h"
 
-#if defined(_WIN32)
-# include <DbgHelp.h>
-#else
+#if !defined(_WIN32)
 # include <sys/file.h>
 #endif
 
@@ -178,9 +176,7 @@ namespace mongo {
     class MyMessageHandler : public MessageHandler {
     public:
         virtual void connected( AbstractMessagingPort* p ) {
-            Client& c = Client::initThread("conn", p);
-            if( p->remote().isLocalHost() )
-                c.getAuthenticationInfo()->setIsALocalHostConnectionWithSpecialAuthPowers();
+            Client::initThread("conn", p);
         }
 
         virtual void process( Message& m , AbstractMessagingPort* port , LastError * le) {
@@ -240,6 +236,36 @@ namespace mongo {
 
     };
 
+    void logStartup() {
+        BSONObjBuilder toLog;
+        stringstream id;
+        id << getHostNameCached() << "-" << jsTime();
+        toLog.append( "_id", id.str() );
+        toLog.append( "hostname", getHostNameCached() );
+
+        toLog.appendTimeT( "startTime", time(0) );
+        char buf[64];
+        curTimeString( buf );
+        toLog.append( "startTimeLocal", buf );
+
+        toLog.append( "cmdLine", CmdLine::getParsedOpts() );
+        toLog.append( "pid", getpid() );
+
+
+        BSONObjBuilder buildinfo( toLog.subobjStart("buildinfo"));
+        appendBuildInfo(buildinfo);
+        buildinfo.doneFast();
+
+        BSONObj o = toLog.obj();
+
+        Lock::GlobalWrite lk;
+        Client::GodScope gs;
+        DBDirectClient c;
+        const char* name = "local.startup_log";
+        c.createCollection( name, 10 * 1024 * 1024, true );
+        c.insert( name, o);
+    }
+
     void listen(int port) {
         //testTheDb();
         MessageServer::Options options;
@@ -249,6 +275,7 @@ namespace mongo {
         MessageServer * server = createServer( options , new MyMessageHandler() );
         server->setAsTimeTracker();
 
+        logStartup();
         startReplication();
         if ( !noHttpInterface )
             boost::thread web( boost::bind(&webServerThread, new RestAdminAccess() /* takes ownership */));
@@ -406,7 +433,6 @@ namespace mongo {
         }
 
         virtual bool includeByDefault() const { return true; }
-        virtual bool adminOnly() const { return false; }
 
         string name() const { return "DataFileSync"; }
 
@@ -446,7 +472,7 @@ namespace mongo {
             }
         }
 
-        BSONObj generateSection( const BSONElement& configElement, bool userIsAdmin ) const {
+        BSONObj generateSection(const BSONElement& configElement) const {
             BSONObjBuilder b;
             b.appendNumber( "flushes" , _flushes );
             b.appendNumber( "total_ms" , _total_time );
@@ -476,7 +502,7 @@ namespace mongo {
     namespace {
         class MemJournalServerStatusMetric : public ServerStatusMetric {
         public:
-            MemJournalServerStatusMetric() : ServerStatusMetric( ".mem.mapped", false ) {}
+            MemJournalServerStatusMetric() : ServerStatusMetric(".mem.mapped") {}
             virtual void appendAtLeaf( BSONObjBuilder& b ) const {
                 int m = static_cast<int>(MemoryMappedFile::totalMappedLength() / ( 1024 * 1024 ));
                 b.appendNumber( "mapped" , m );
@@ -496,7 +522,7 @@ namespace mongo {
         return killCurrentOp.checkForInterruptNoAssert();
     }
 
-    unsigned jsGetInterruptSpecCallback() {
+    unsigned jsGetCurrentOpIdCallback() {
         return cc().curop()->opNum();
     }
 
@@ -566,6 +592,7 @@ namespace mongo {
         log() << mongodVersion() << endl;
         printGitVersion();
         printSysInfo();
+        printAllocator();
         printCommandLineOpts();
 
         {
@@ -619,7 +646,7 @@ namespace mongo {
         if ( scriptingEnabled ) {
             ScriptEngine::setup();
             globalScriptEngine->setCheckInterruptCallback( jsInterruptCallback );
-            globalScriptEngine->setGetInterruptSpecCallback( jsGetInterruptSpecCallback );
+            globalScriptEngine->setGetCurrentOpIdCallback( jsGetCurrentOpIdCallback );
         }
 
         repairDatabasesAndCheckVersion();
@@ -654,7 +681,7 @@ namespace mongo {
         if( !noauth ) {
             // open admin db in case we need to use it later. TODO this is not the right way to
             // resolve this.
-            Client::WriteContext c("admin",dbpath,false);
+            Client::WriteContext c("admin", dbpath);
         }
 
         listen(listenPort);
@@ -731,6 +758,7 @@ static void buildOptionsDescriptions(po::options_description *pVisible,
     po::options_description rs_options("Replica set options");
     po::options_description replication_options("Replication options");
     po::options_description sharding_options("Sharding options");
+    po::options_description hidden_sharding_options("Sharding options");
     po::options_description ssl_options("SSL options");
 
     CmdLine::addGlobalOptions( general_options , hidden_options , ssl_options );
@@ -799,8 +827,13 @@ static void buildOptionsDescriptions(po::options_description *pVisible,
     sharding_options.add_options()
     ("configsvr", "declare this is a config db of a cluster; default port 27019; default dir /data/configdb")
     ("shardsvr", "declare this is a shard db of a cluster; default port 27018")
-    ("noMoveParanoia" , "turn off paranoid saving of data for moveChunk.  this is on by default for now, but default will switch" )
     ;
+
+    hidden_sharding_options.add_options()
+    ("noMoveParanoia" , "turn off paranoid saving of data for the moveChunk command; default" )
+    ("moveParanoia" , "turn on paranoid saving of data during the moveChunk command (used for internal system diagnostics)" )
+    ;
+    hidden_options.add(hidden_sharding_options);
 
     hidden_options.add_options()
     ("fastsync", "indicate that this instance is starting from a dbpath snapshot of the repl peer")
@@ -1103,6 +1136,9 @@ static void processCommandLineOptions(const std::vector<std::string>& argv) {
                 cmdLine.dur = true;
             if ( params.count( "dbpath" ) == 0 )
                 dbpath = "/data/configdb";
+            replSettings.master = true;
+            if ( params.count( "oplogsize" ) == 0 )
+                cmdLine.oplogSize = 5 * 1024 * 1024;
         }
         if ( params.count( "profile" ) ) {
             cmdLine.defaultProfile = params["profile"].as<int>();
@@ -1110,9 +1146,18 @@ static void processCommandLineOptions(const std::vector<std::string>& argv) {
         if (params.count("ipv6")) {
             enableIPv6();
         }
-        if (params.count("noMoveParanoia")) {
-            cmdLine.moveParanoia = false;
+
+        if (params.count("noMoveParanoia") > 0 && params.count("moveParanoia") > 0) {
+            out() << "The moveParanoia and noMoveParanoia flags cannot both be set; please use only one of them." << endl;
+            ::_exit( EXIT_BADOPTIONS );
         }
+
+        if (params.count("noMoveParanoia"))
+            cmdLine.moveParanoia = false;
+
+        if (params.count("moveParanoia"))
+            cmdLine.moveParanoia = true;
+
         if (params.count("pairwith") || params.count("arbiter") || params.count("opIdMem")) {
             out() << "****" << endl;
             out() << "Replica Pairs have been deprecated. Invalid options: --pairwith, --arbiter, and/or --opIdMem" << endl;
@@ -1157,10 +1202,6 @@ static void processCommandLineOptions(const std::vector<std::string>& argv) {
             log() << endl;
             warning() << "32-bit servers don't have journaling enabled by default. Please use --journal if you want durability." << endl;
             log() << endl;
-        }
-
-        if (params.count("enableFaultInjection")) {
-            enableFailPointCmd();
         }
 
         Module::configAll(params);
@@ -1387,7 +1428,7 @@ namespace mongo {
         exitCleanly( EXIT_KILL );
     }
 
-    BOOL CtrlHandler( DWORD fdwCtrlType ) {
+    BOOL WINAPI CtrlHandler( DWORD fdwCtrlType ) {
 
         switch( fdwCtrlType ) {
 
@@ -1420,94 +1461,6 @@ namespace mongo {
         }
     }
 
-    LPTOP_LEVEL_EXCEPTION_FILTER filtLast = 0;
-
-    /* create a process dump.
-        To use, load up windbg.  Set your symbol and source path.
-        Open the crash dump file.  To see the crashing context, use .ecxr
-        */
-    void doMinidump(struct _EXCEPTION_POINTERS* exceptionInfo) {
-        LPCWSTR dumpFilename = L"mongo.dmp";
-        HANDLE hFile = CreateFileW(dumpFilename,
-            GENERIC_WRITE,
-            0,
-            NULL,
-            CREATE_ALWAYS,
-            FILE_ATTRIBUTE_NORMAL,
-            NULL);
-        if ( INVALID_HANDLE_VALUE == hFile ) {
-            DWORD lasterr = GetLastError();
-            log() << "failed to open minidump file " << toUtf8String(dumpFilename) << " : "
-                  << errnoWithDescription( lasterr ) << endl;
-            return;
-        }
-
-        MINIDUMP_EXCEPTION_INFORMATION aMiniDumpInfo;
-        aMiniDumpInfo.ThreadId = GetCurrentThreadId();
-        aMiniDumpInfo.ExceptionPointers = exceptionInfo;
-        aMiniDumpInfo.ClientPointers = TRUE;
-
-        log() << "writing minidump diagnostic file " << toUtf8String(dumpFilename) << endl;
-        BOOL bstatus = MiniDumpWriteDump(GetCurrentProcess(),
-            GetCurrentProcessId(),
-            hFile,
-            MiniDumpNormal,
-            &aMiniDumpInfo,
-            NULL,
-            NULL);
-        if ( FALSE == bstatus ) {
-            DWORD lasterr = GetLastError();
-            log() << "failed to create minidump : "
-                  << errnoWithDescription( lasterr ) << endl;
-        }
-
-        CloseHandle(hFile);
-    }
-
-    LONG WINAPI exceptionFilter( struct _EXCEPTION_POINTERS *excPointers ) {
-        char exceptionString[128];
-        sprintf_s( exceptionString, sizeof( exceptionString ),
-                ( excPointers->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION ) ?
-                "(access violation)" : "0x%08X", excPointers->ExceptionRecord->ExceptionCode );
-        char addressString[32];
-        sprintf_s( addressString, sizeof( addressString ), "0x%p",
-                 excPointers->ExceptionRecord->ExceptionAddress );
-        log() << "*** unhandled exception " << exceptionString <<
-                " at " << addressString << ", terminating" << endl;
-        if ( excPointers->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION ) {
-            ULONG acType = excPointers->ExceptionRecord->ExceptionInformation[0];
-            const char* acTypeString;
-            switch ( acType ) {
-            case 0:
-                acTypeString = "read from";
-                break;
-            case 1:
-                acTypeString = "write to";
-                break;
-            case 8:
-                acTypeString = "DEP violation at";
-                break;
-            default:
-                acTypeString = "unknown violation at";
-                break;
-            }
-            sprintf_s( addressString, sizeof( addressString ), " 0x%p",
-                     excPointers->ExceptionRecord->ExceptionInformation[1] );
-            log() << "*** access violation was a " << acTypeString << addressString << endl;
-        }
-
-        log() << "*** stack trace for unhandled exception:" << endl;
-        printWindowsStackTrace( *excPointers->ContextRecord );
-        doMinidump(excPointers);
-
-        // Don't go through normal shutdown procedure. It may make things worse.
-        log() << "*** immediate exit due to unhandled exception" << endl;
-        ::_exit(EXIT_ABRUPT);
-
-        // We won't reach here
-        return EXCEPTION_EXECUTE_HANDLER;
-    }
-
     // called by mongoAbort()
     extern void (*reportEventToSystem)(const char *msg);
     void reportEventToSystemImpl(const char *msg) {
@@ -1533,8 +1486,10 @@ namespace mongo {
 
     void setupSignals( bool inFork ) {
         reportEventToSystem = reportEventToSystemImpl;
-        filtLast = SetUnhandledExceptionFilter(exceptionFilter);
-        massert(10297 , "Couldn't register Windows Ctrl-C handler", SetConsoleCtrlHandler((PHANDLER_ROUTINE) CtrlHandler, TRUE));
+        setWindowsUnhandledExceptionFilter();
+        massert(10297,
+                "Couldn't register Windows Ctrl-C handler",
+                SetConsoleCtrlHandler(static_cast<PHANDLER_ROUTINE>(CtrlHandler), TRUE));
         _set_purecall_handler( myPurecallHandler );
     }
 

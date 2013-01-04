@@ -59,9 +59,9 @@ namespace mongo {
     void PoolForHost::reportBadConnectionAt(uint64_t microSec) {
         if (microSec != DBClientBase::INVALID_SOCK_CREATION_TIME &&
                 microSec > _minValidCreationTimeMicroSec) {
-            log() << "Detecting bad connection created at " << _minValidCreationTimeMicroSec
-                    << " microSec, clearing pool for " << _hostName << endl;
             _minValidCreationTimeMicroSec = microSec;
+            log() << "Detected bad connection created at " << _minValidCreationTimeMicroSec
+                    << " microSec, clearing pool for " << _hostName << endl;
             clear();
         }
     }
@@ -101,10 +101,6 @@ namespace mongo {
             _pool.pop();
             bool res;
             bool alive = false;
-            // When a connection is in the pool it doesn't have an AuthenticationTable set.
-            // Set the table temporarily for the isMaster command.
-            c.conn->setAuthenticationTable(
-                    AuthenticationTable::getInternalSecurityAuthenticationTable() );
             try {
                 c.conn->isMaster( res );
                 alive = true;
@@ -117,7 +113,6 @@ namespace mongo {
                 c.conn = NULL;
             }
             if ( alive ) {
-                c.conn->clearAuthenticationTable();
                 all.push_back( c );
             }
         }
