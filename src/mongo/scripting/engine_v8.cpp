@@ -298,7 +298,8 @@ namespace mongo {
 
     V8ScriptEngine::V8ScriptEngine() :
         _globalInterruptLock("GlobalV8InterruptLock"),
-        _opToScopeMap() {
+        _opToScopeMap(),
+        _deadlineMonitor() {
     }
 
     V8ScriptEngine::~V8ScriptEngine() {
@@ -401,6 +402,11 @@ namespace mongo {
         }
         LOG(1) << "marking v8 scope for death.  isolate: " << _isolate << endl;
         _pendingKill = true;
+    }
+
+    /** check if there is a pending killOp request */
+    bool V8Scope::isKillPending() const {
+        return _pendingKill || _engine->interrupted();
     }
 
     /**
@@ -788,7 +794,18 @@ namespace mongo {
             return handle_scope.Close(v8::Local<v8::Function>());
         }
 
+        if (!nativeEpilogue()) {
+            _error = str::stream() << "javascript execution terminated ";
+            return handle_scope.Close(v8::Handle<v8::Function>());
+        }
+
         v8::Local<v8::Value> result = script->Run();
+
+        if (!nativePrologue()) {
+            _error = str::stream() << "javascript execution terminated ";
+            return handle_scope.Close(v8::Handle<v8::Function>());
+        }
+
         if (result.IsEmpty()) {
             _error = (string)"compile error: " + toSTLString(&try_catch);
             log() << _error << endl;
@@ -834,8 +851,6 @@ namespace mongo {
         // TODO SERVER-8016: properly allocate handles on the stack
         v8::Handle<v8::Value> args[24];
 
-        // TODO SERVER-8053: implement timeoutMs
-
         const int nargs = argsObject ? argsObject->nFields() : 0;
         if (nargs) {
             BSONObjIterator it(*argsObject);
@@ -861,7 +876,15 @@ namespace mongo {
             return 1;
         }
 
+        if (timeoutMs)
+            // start the deadline timer for this script
+            _engine->getDeadlineMonitor()->startDeadline(this, timeoutMs);
+
         result = ((v8::Function*)(*funcValue))->Call(v8recv, nargs, nargs ? args : NULL);
+
+        if (timeoutMs)
+            // stop the deadline timer for this script
+            _engine->getDeadlineMonitor()->stopDeadline(this);
 
         if (!nativePrologue()) {
             _error = str::stream() << "javascript execution interrupted";
@@ -891,8 +914,6 @@ namespace mongo {
         V8_SIMPLE_HEADER
         v8::TryCatch try_catch;
 
-        // TODO SERVER-8053: implement timeoutMs
-
         v8::Handle<v8::Script> script =
                 v8::Script::Compile(v8::String::New(code.rawData(), code.size()),
                                     v8::String::New(name.c_str()));
@@ -907,8 +928,8 @@ namespace mongo {
             return false;
         }
 
-        if (globalScriptEngine->interrupted()) {
-            _error = (string)"JavaScript error: " + globalScriptEngine->checkInterrupt();
+        if (!nativeEpilogue()) {
+            _error = str::stream() << "javascript execution terminated (before call) ";
             if (reportError)
                 log() << _error << endl;
             if (assertOnError)
@@ -916,15 +937,30 @@ namespace mongo {
             return false;
         }
 
+        if (timeoutMs)
+            // start the deadline timer for this script
+            _engine->getDeadlineMonitor()->startDeadline(this, timeoutMs);
+
         v8::Handle<v8::Value> result = script->Run();
 
+        if (timeoutMs)
+            // stopt the deadline timer for this script
+            _engine->getDeadlineMonitor()->stopDeadline(this);
+
+        bool resultSuccess = true;
+        if (!nativePrologue()) {
+            resultSuccess = false;
+            _error = str::stream() << "javascript execution interrupted "
+                                   << (try_catch.HasCaught() && try_catch.CanContinue() ?
+                                            toSTLString(&try_catch) : "");
+        }
         if (result.IsEmpty()) {
-            stringstream ss;
-            ss << "JavaScript error: "
-               << ((try_catch.HasCaught() && try_catch.CanContinue()) ?
-                        toSTLString(&try_catch) :
-                        globalScriptEngine->checkInterrupt());
-            _error = ss.str();
+            resultSuccess = false;
+            _error = str::stream() << "javascript execution failed "
+                                   << (try_catch.HasCaught() && try_catch.CanContinue() ?
+                                            toSTLString(&try_catch) : "");
+        }
+        if (!resultSuccess) {
             if (reportError)
                 log() << _error << endl;
             if (assertOnError)
@@ -1044,16 +1080,30 @@ namespace mongo {
         registerOpId();
     }
 
-    v8::Local<v8::Value> newFunction(const char *code) {
+    v8::Local<v8::Value> V8Scope::newFunction(const char *code) {
         v8::HandleScope handle_scope;
         stringstream codeSS;
         codeSS << "____MongoToV8_newFunction_temp = " << code;
         string codeStr = codeSS.str();
-        string errStr = str::stream() << "Could not compile function: " << codeStr;
+        string errStr = str::stream() << "could not compile function: " << codeStr;
 
         v8::Local<v8::Script> compiled = v8::Script::New(v8::String::New(codeStr.c_str()));
         uassert(16670, errStr, !compiled.IsEmpty());
+
+        if (!nativeEpilogue()) {
+            _error = str::stream()
+                    << "javascript execution terminated during newFunction compilation";
+            return handle_scope.Close(v8::Handle<v8::Value>());
+        }
+
         v8::Local<v8::Value> ret = compiled->Run();
+
+        if (!nativePrologue()) {
+            _error = str::stream() << "javascript execution terminated";
+            if (!ret.IsEmpty())
+                return handle_scope.Close(ret);
+            return handle_scope.Close(v8::Handle<v8::Value>());
+        }
         uassert(16671, errStr, !ret.IsEmpty());
         return handle_scope.Close(ret);
     }
