@@ -264,7 +264,7 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>ENABLE_DEBUGGER_SUPPORT;WIN32;V8_TARGET_ARCH_IA32;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>ENABLE_DEBUGGER_SUPPORT;WIN32;V8_TARGET_ARCH_IA32;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>..;..\..;..\..\third_party\v8\include;..\..\third_party\pcre-8.30;..\..\third_party\boost</AdditionalIncludeDirectories>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
@@ -296,7 +296,7 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>ENABLE_DEBUGGER_SUPPORT;WIN32;V8_TARGET_ARCH_X64;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>ENABLE_DEBUGGER_SUPPORT;WIN32;V8_TARGET_ARCH_X64;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>..;..\..;..\..\third_party\v8\include;..\..\third_party\pcre-8.30;..\..\third_party\boost</AdditionalIncludeDirectories>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
@@ -327,7 +327,7 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>ENABLE_DEBUGGER_SUPPORT;WIN32;V8_TARGET_ARCH_IA32;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>ENABLE_DEBUGGER_SUPPORT;WIN32;V8_TARGET_ARCH_IA32;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>..;..\..;..\..\third_party\v8\include;..\..\third_party\pcre-8.30;..\..\third_party\boost</AdditionalIncludeDirectories>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
@@ -359,7 +359,7 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>ENABLE_DEBUGGER_SUPPORT;WIN32;V8_TARGET_ARCH_X64;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>ENABLE_DEBUGGER_SUPPORT;WIN32;V8_TARGET_ARCH_X64;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>..;..\..;..\..\third_party\v8\include;..\..\third_party\pcre-8.30;..\..\third_party\boost</AdditionalIncludeDirectories>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
@@ -1078,8 +1078,39 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
     <ClCompile Include="..\db\dbmessage.cpp" />
     <ClCompile Include="..\platform\random.cpp" />
     <ClCompile Include="..\scripting\bson_template_evaluator.cpp" />
+    <ClCompile Include="..\scripting\bson_template_evaluator_test.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win2008PlusDebug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|x64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\scripting\engine_none.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win2008PlusDebug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|x64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\scripting\engine_spidermonkey.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win2008PlusDebug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|x64'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\scripting\engine_v8.cpp" />
+    <ClCompile Include="..\scripting\sm_db.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win2008PlusDebug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|x64'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\scripting\v8_db.cpp" />
+    <ClCompile Include="..\scripting\v8_deadline_monitor_test.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win2008PlusDebug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|x64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\scripting\v8_profiler.cpp" />
     <ClCompile Include="..\scripting\v8_utils.cpp" />
     <ClCompile Include="..\util\concurrency\mutexdebugger.cpp" />
     <ClCompile Include="..\util\fail_point.cpp" />
@@ -1128,32 +1159,32 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
     <ClCompile Include="..\..\third_party\boost\libs\thread\src\win32\thread.cpp">
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_DEBUG;DEBUG;OBJECT_PRINT;ENABLE_DISASSEMBLER;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_DEBUG;DEBUG;OBJECT_PRINT;ENABLE_DISASSEMBLER;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win2008PlusDebug|Win32'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_DEBUG;DEBUG;OBJECT_PRINT;ENABLE_DISASSEMBLER;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win2008PlusDebug|x64'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_DEBUG;DEBUG;OBJECT_PRINT;ENABLE_DISASSEMBLER;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|Win32'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|x64'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|Win32'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|x64'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <ClCompile Include="..\..\third_party\boost\libs\thread\src\win32\tss_dll.cpp">
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_DEBUG;DEBUG;OBJECT_PRINT;ENABLE_DISASSEMBLER;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_DEBUG;DEBUG;OBJECT_PRINT;ENABLE_DISASSEMBLER;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win2008PlusDebug|Win32'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_DEBUG;DEBUG;OBJECT_PRINT;ENABLE_DISASSEMBLER;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win2008PlusDebug|x64'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_DEBUG;DEBUG;OBJECT_PRINT;ENABLE_DISASSEMBLER;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|Win32'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|x64'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|Win32'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|x64'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <ClCompile Include="..\..\third_party\boost\libs\thread\src\win32\tss_pe.cpp">
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_DEBUG;DEBUG;OBJECT_PRINT;ENABLE_DISASSEMBLER;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_DEBUG;DEBUG;OBJECT_PRINT;ENABLE_DISASSEMBLER;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win2008PlusDebug|Win32'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_DEBUG;DEBUG;OBJECT_PRINT;ENABLE_DISASSEMBLER;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win2008PlusDebug|x64'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_DEBUG;DEBUG;OBJECT_PRINT;ENABLE_DISASSEMBLER;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|Win32'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|x64'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|Win32'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|x64'">BOOST_THREAD_BUILD_LIB;BOOST_ALL_NO_LIB;XP_WIN;HAVE_CONFIG_H;MONGO_EXPOSE_MACROS;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <ClCompile Include="..\bson\oid.cpp" />
     <ClCompile Include="..\client\clientAndShell.cpp" />
@@ -1598,9 +1629,24 @@ cscript //Nologo "$(ProjectDir)..\shell\createCPPfromJavaScriptFiles.js" "$(Proj
     <ClInclude Include="..\platform\unordered_map.h" />
     <ClInclude Include="..\platform\unordered_set.h" />
     <ClInclude Include="..\platform\windows_basic.h" />
+    <ClInclude Include="..\scripting\bench.h" />
     <ClInclude Include="..\scripting\bson_template_evaluator.h" />
+    <ClInclude Include="..\scripting\engine_spidermonkey.h">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win2008PlusDebug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|x64'">true</ExcludedFromBuild>
+    </ClInclude>
+    <ClInclude Include="..\scripting\engine_spidermonkey_internal.h">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win2008PlusDebug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Win2008PlusRelease|x64'">true</ExcludedFromBuild>
+    </ClInclude>
     <ClInclude Include="..\scripting\engine_v8.h" />
     <ClInclude Include="..\scripting\v8_db.h" />
+    <ClInclude Include="..\scripting\v8_deadline_monitor.h" />
+    <ClInclude Include="..\scripting\v8_profiler.h" />
     <ClInclude Include="..\scripting\v8_utils.h" />
     <ClInclude Include="..\util\bson_util.h" />
     <ClInclude Include="..\util\elapsed_tracker.h" />

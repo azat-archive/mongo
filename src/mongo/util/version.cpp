@@ -28,7 +28,7 @@
 #include "mongo/base/parse_number.h"
 #include "mongo/db/cmdline.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/pdfile.h"
+#include "mongo/db/pdfile_version.h"
 //#include "mongo/scripting/engine.h"
 #include "mongo/util/file.h"
 #include "mongo/util/processinfo.h"
@@ -47,7 +47,7 @@ namespace mongo {
      *      1.2.3-rc4-pre-
      * If you really need to do something else you'll need to fix _versionArray()
      */
-    const char versionString[] = "2.3.3-pre-";
+    const char versionString[] = "2.4.0-rc1-pre-";
 
     // See unit test for example outputs
     static BSONArray _versionArray(const char* version){

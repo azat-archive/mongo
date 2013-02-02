@@ -568,7 +568,10 @@ namespace mongo {
             dbtempreleasecond unlock;
             if ( unlock.unlocked() ) {
                 if ( haveReadLock ) {
-                    // don't sleep with a read lock
+                    // This sleep helps reader threads yield to writer threads.
+                    // Without this, the underlying reader/writer lock implementations
+                    // are not sufficiently writer-greedy.
+                    sleepmicros(1);
                 }
                 else {
                     if ( micros == -1 )
@@ -873,7 +876,8 @@ namespace mongo {
             return false;
         }
 
-        if (!cc().getAuthorizationManager()->checkAuthorization(cursor->ns(), ActionType::find)) {
+        if (!cc().getAuthorizationManager()->checkAuthorization(cursor->ns(),
+                                                                ActionType::killCursors)) {
             return false;
         }
 

@@ -20,10 +20,10 @@
 
 #include <algorithm> // for max
 
-#include "mongo/db/oplog.h"
-#include "mongo/db/ops/field_ref.h"
+#include "mongo/db/field_ref.h"
 #include "mongo/db/jsobjmanipulator.h"
 #include "mongo/db/pdfile.h"
+#include "mongo/db/oplog.h"
 #include "mongo/util/mongoutils/str.h"
 
 #include "update_internal.h"
@@ -171,7 +171,7 @@ namespace mongo {
                 while ( i.more() ) {
                     bb.append( i.next() );
                 }
-                BSONObjIterator j( elt.embeddedObject() );
+                BSONObjIterator j( getEach() );
                 while ( j.more() ) {
                     bb.append( j.next() );
                 }
@@ -181,8 +181,8 @@ namespace mongo {
                 ms.fixedArray = BSONArray( bb.done().getOwned() );
             }
 
-            // If we're in the "push all" case with slice, we have to decide how much of each
-            // of the existing and parameter arrays to copy to the final object.
+            // If we're in the "push with a $each" case with slice, we have to decide how much
+            // of each of the existing and parameter arrays to copy to the final object.
             else if ( isSliceOnly() ) {
                 long long slice = getSlice();
                 BSONObj eachArray = getEach();
@@ -237,7 +237,6 @@ namespace mongo {
             // decide how much of each of the resulting work area to copy to the final object.
             else {
                 long long slice = getSlice();
-                BSONObj sortPattern = getSort();
 
                 // Zero slice is equivalent to resetting the array in the final object, so
                 // we only go into sorting if there is anything to sort.
@@ -251,7 +250,8 @@ namespace mongo {
                     while ( j.more() ) {
                         workArea.push_back( j.next().Obj() );
                     }
-                    sort( workArea.begin(), workArea.end(), ProjectKeyCmp( sortPattern ) );
+                    ProjectKeyCmp cmp( getSort() );
+                    sort( workArea.begin(), workArea.end(), cmp );
 
                     long long skip = std::max( 0LL,
                                                (long long)workArea.size() - slice );
@@ -720,7 +720,28 @@ namespace mongo {
         return mss;
     }
 
-    void ModState::appendForOpLog( BSONObjBuilder& b ) const {
+    const char* ModState::getOpLogName() const {
+        if ( dontApply ) {
+            return NULL;
+        }
+
+        if ( incType ) {
+            return "$set";
+        }
+
+        if ( m->op == Mod::RENAME_FROM ) {
+            return "$unset";
+        }
+
+        if ( m->op == Mod::RENAME_TO ) {
+            return "$set";
+        }
+
+        return fixedOpName ? fixedOpName : Mod::modNames[op()];
+    }
+
+
+    void ModState::appendForOpLog( BSONObjBuilder& bb ) const {
         // dontApply logic is deprecated for all but $rename.
         if ( dontApply ) {
             return;
@@ -729,23 +750,18 @@ namespace mongo {
         if ( incType ) {
             DEBUGUPDATE( "\t\t\t\t\t appendForOpLog inc fieldname: " << m->fieldName
                          << " short:" << m->shortFieldName );
-            BSONObjBuilder bb( b.subobjStart( "$set" ) );
             appendIncValue( bb , true );
-            bb.done();
             return;
         }
 
         if ( m->op == Mod::RENAME_FROM ) {
             DEBUGUPDATE( "\t\t\t\t\t appendForOpLog RENAME_FROM fieldName:" << m->fieldName );
-            BSONObjBuilder bb( b.subobjStart( "$unset" ) );
             bb.append( m->fieldName, 1 );
-            bb.done();
             return;
         }
 
         if ( m->op == Mod::RENAME_TO ) {
             DEBUGUPDATE( "\t\t\t\t\t appendForOpLog RENAME_TO fieldName:" << m->fieldName );
-            BSONObjBuilder bb( b.subobjStart( "$set" ) );
             bb.appendAs( newVal, m->fieldName );
             return;
         }
@@ -756,13 +772,10 @@ namespace mongo {
                      << " fn: " << m->fieldName );
 
         if (strcmp(name, "$unset") == 0) {
-            BSONObjBuilder bb(b.subobjStart(name));
             bb.append(m->fieldName, 1);
-            bb.done();
             return;
         }
 
-        BSONObjBuilder bb( b.subobjStart( name ) );
         if ( fixed ) {
             bb.appendAs( *fixed , m->fieldName );
         }
@@ -776,7 +789,32 @@ namespace mongo {
         else {
             bb.appendAs( m->elt , m->fieldName );
         }
-        bb.done();
+
+    }
+
+    typedef map<string, vector<ModState*> > NamedModMap;
+
+    BSONObj ModSetState::getOpLogRewrite() const {
+        NamedModMap names;
+        for ( ModStateHolder::const_iterator i = _mods.begin(); i != _mods.end(); ++i ) {
+            const char* name = i->second->getOpLogName();
+            if ( ! name )
+                continue;
+            names[name].push_back( i->second.get() );
+        }
+
+        BSONObjBuilder b;
+        for ( NamedModMap::const_iterator i = names.begin();
+              i != names.end();
+              ++i ) {
+            BSONObjBuilder bb( b.subobjStart( i->first ) );
+            const vector<ModState*>& mods = i->second;
+            for ( unsigned j = 0; j < mods.size(); j++ ) {
+                mods[j]->appendForOpLog( bb );
+            }
+            bb.doneFast();
+        }
+        return b.obj();
     }
 
     string ModState::toString() const {
@@ -1106,9 +1144,16 @@ namespace mongo {
                     // this can be a query piece
                     // or can be a dbref or something
 
-                    int op = e.embeddedObject().firstElement().getGtLtOp( -1 );
-                    if ( op >= 0 ) {
-                        // this means this is a $gt type filter, so don't make part of the new object
+                    int op = e.embeddedObject().firstElement().getGtLtOp();
+                    if ( op > 0 ) {
+                        // This means this is a $gt type filter, so don't make it part of the new
+                        // object.
+                        continue;
+                    }
+
+                    if ( str::equals( e.embeddedObject().firstElement().fieldName(), "$not" ) ) {
+                        // A $not filter operator is not detected in getGtLtOp() and should not
+                        // become part of the new object.
                         continue;
                     }
                 }
@@ -1240,8 +1285,20 @@ namespace mongo {
                                                    ( fieldSortElem.type() == NumberDouble &&
                                                      fieldSortElem.numberDouble() ==
                                                      (long long) fieldSortElem.numberDouble() ) ) &&
-                                                 fieldSortElem.Number()*fieldSortElem.Number()
-                                                 == 1.0);
+                                                 ( fieldSortElem.Number() == 1 ||
+                                                   fieldSortElem.Number() == -1 ) );
+
+                                        FieldRef sortField;
+                                        sortField.parse( fieldSortElem.fieldName() );
+                                        uassert( 16690,
+                                                 "$sort field cannot be empty",
+                                                 sortField.numParts() > 0 );
+
+                                        for ( size_t i = 0; i < sortField.numParts(); i++ ) {
+                                            uassert( 16691,
+                                                     "empty field in dotted sort pattern",
+                                                     sortField.getPart( i ).size() > 0 );
+                                        }
                                     }
 
                                     // Finally, check if the $each is made of objects (as opposed
@@ -1255,6 +1312,7 @@ namespace mongo {
                                                  "$sort requires $each to be an array of objects",
                                                  eachItem.type() == Object );
                                     }
+
                                 }
                                 else {
                                     uasserted( 16643,

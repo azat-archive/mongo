@@ -134,7 +134,7 @@ DBCollection.prototype._validateObject = function( o ){
         throw "can't save a DBQuery object";
 }
 
-DBCollection._allowedFields = { $id : 1 , $ref : 1 , $db : 1 , $MinKey : 1, $MaxKey : 1 };
+DBCollection._allowedFields = { $id : 1 , $ref : 1 , $db : 1 };
 
 DBCollection.prototype._validateForStorage = function( o ){
     this._validateObject( o );
@@ -1063,10 +1063,10 @@ DBCollection.prototype.getSplitKeysForChunks = function( chunkSize ){
    
    if( ! chunkSize ){
        chunkSize = config.settings.findOne({ _id : "chunksize" }).value
-       print( "Chunk size not set, using default of " + chunkSize + "Mb" )
+       print( "Chunk size not set, using default of " + chunkSize + "MB" )
    }
    else{
-       print( "Using chunk size of " + chunkSize + "Mb" )
+       print( "Using chunk size of " + chunkSize + "MB" )
    }
     
    var shardDocs = config.shards.find().toArray()

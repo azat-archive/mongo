@@ -461,6 +461,30 @@ namespace UpdateTests {
         }
     };
 
+    class PushEachSimple : public SetBase {
+    public:
+        void run() {
+            client().insert( ns(), fromjson( "{'_id':0,a:[1]}" ) );
+            // { $push : { a : { $each : [ 2, 3 ] } } }
+            BSONObj pushObj = BSON( "$each" << BSON_ARRAY( 2 << 3 ) );
+            client().update( ns(), Query(), BSON( "$push" << BSON( "a" << pushObj ) ) );
+            ASSERT_EQUALS( client().findOne( ns(), Query() ) , fromjson( "{'_id':0,a:[1,2,3]}" ) );
+        }
+
+    };
+
+    class PushEachFromEmpty : public SetBase {
+    public:
+        void run() {
+            client().insert( ns(), fromjson( "{'_id':0,a:[]}" ) );
+            // { $push : { a : { $each : [ 1, 2, 3 ] } } }
+            BSONObj pushObj = BSON( "$each" << BSON_ARRAY( 1 << 2 << 3 ) );
+            client().update( ns(), Query(), BSON( "$push" << BSON( "a" << pushObj ) ) );
+            ASSERT_EQUALS( client().findOne( ns(), Query() ) , fromjson( "{'_id':0,a:[1,2,3]}" ) );
+        }
+
+    };
+
     class PushSliceBelowFull : public SetBase {
     public:
         void run() {
@@ -1259,35 +1283,55 @@ namespace UpdateTests {
         }
     };
 
-    class PushSortInvalidSortPattern {
+    class PushSortInvalidSortPattern : public SetBase {
     public:
         void run() {
-            vector<BSONObj> dummy;
+            // Sort pattern validation is made during update command checking. Therefore, to
+            // catch bad patterns, we have to write updated that use them.
 
-            ASSERT_THROWS( sort( dummy.begin(),
-                                 dummy.end(),
-                                 ProjectKeyCmp( fromjson( "{'a..d':-1}" ) ) ),
-                           UserException );
+            BSONObj expected = fromjson( "{'_id':0,x:[{a:1}, {a:2}]}" );
+            client().insert( ns(), expected );
 
-            ASSERT_THROWS( sort( dummy.begin(),
-                                 dummy.end(),
-                                 ProjectKeyCmp( fromjson( "{'a.':-1}" ) ) ),
-                           UserException );
+            // { $push : { x : { $each : [ {a:3} ], $slice:-2, $sort : {a..d:1} } } }
+            BSONObj pushObj = BSON( "$each" << BSON_ARRAY( BSON( "a" << 3 ) ) <<
+                                    "$slice" << -2 <<
+                                    "$sort" << BSON( "a..d" << 1 ) );
+            client().update( ns(), Query(), BSON( "$push" << BSON( "x" << pushObj ) ) );
+            BSONObj result = client().findOne( ns(), Query() );
+            ASSERT_EQUALS( result, expected );
 
-            ASSERT_THROWS( sort( dummy.begin(),
-                                 dummy.end(),
-                                 ProjectKeyCmp( fromjson( "{'.b':-1}" ) ) ),
-                           UserException );
 
-            ASSERT_THROWS( sort( dummy.begin(),
-                                 dummy.end(),
-                                 ProjectKeyCmp( fromjson( "{'.':-1}" ) ) ),
-                           UserException );
+            // { $push : { x : { $each : [ {a:3} ], $slice:-2, $sort : {a.:1} } } }
+            pushObj = BSON( "$each" << BSON_ARRAY( BSON( "a" << 3 ) ) <<
+                                    "$slice" << -2 <<
+                                    "$sort" << BSON( "a." << 1 ) );
+            client().update( ns(), Query(), BSON( "$push" << BSON( "x" << pushObj ) ) );
+            result = client().findOne( ns(), Query() );
+            ASSERT_EQUALS( result, expected );
 
-            ASSERT_THROWS( sort( dummy.begin(),
-                                 dummy.end(),
-                                 ProjectKeyCmp( fromjson( "{'':-1}" ) ) ),
-                           UserException );
+            // { $push : { x : { $each : [ {a:3} ], $slice:-2, $sort : {.b:1} } } }
+            pushObj = BSON( "$each" << BSON_ARRAY( BSON( "a" << 3 ) ) <<
+                                    "$slice" << -2 <<
+                                    "$sort" << BSON( ".b" << 1 ) );
+            client().update( ns(), Query(), BSON( "$push" << BSON( "x" << pushObj ) ) );
+            result = client().findOne( ns(), Query() );
+            ASSERT_EQUALS( result, expected );
+
+            // { $push : { x : { $each : [ {a:3} ], $slice:-2, $sort : {.:1} } } }
+            pushObj = BSON( "$each" << BSON_ARRAY( BSON( "a" << 3 ) ) <<
+                                    "$slice" << -2 <<
+                                    "$sort" << BSON( "." << 1 ) );
+            client().update( ns(), Query(), BSON( "$push" << BSON( "x" << pushObj ) ) );
+            result = client().findOne( ns(), Query() );
+            ASSERT_EQUALS( result, expected );
+
+            // { $push : { x : { $each : [ {a:3} ], $slice:-2, $sort : {'':1} } } }
+            pushObj = BSON( "$each" << BSON_ARRAY( BSON( "a" << 3 ) ) <<
+                                    "$slice" << -2 <<
+                                    "$sort" << BSON( "" << 1 ) );
+            client().update( ns(), Query(), BSON( "$push" << BSON( "x" << pushObj ) ) );
+            result = client().findOne( ns(), Query() );
+            ASSERT_EQUALS( result, expected );
         }
     };
 
@@ -1706,7 +1750,7 @@ namespace UpdateTests {
                 auto_ptr<ModSetState> modSetState = modSet.prepare( obj );
                 ASSERT_FALSE( modSetState->canApplyInPlace() );
                 modSetState->createNewFromMods();
-                ASSERT_EQUALS( BSON( "$set" << BSON( "a" << 3 ) << "$set" << BSON("b" << 2)),
+                ASSERT_EQUALS( BSON( "$set" << BSON( "a" << 3 << "b" << 2)),
                                modSetState->getOpLogRewrite() );
             }
         };
@@ -1720,7 +1764,7 @@ namespace UpdateTests {
                 auto_ptr<ModSetState> modSetState = modSet.prepare( obj );
                 ASSERT_FALSE( modSetState->canApplyInPlace() );
                 modSetState->createNewFromMods();
-                ASSERT_EQUALS( BSON( "$set" << BSON( "a" << 1 ) << "$set" << BSON("b" << 2)),
+                ASSERT_EQUALS( BSON( "$set" << BSON( "a" << 1 << "b" << 2)),
                                modSetState->getOpLogRewrite() );
             }
         };
@@ -2005,7 +2049,7 @@ namespace UpdateTests {
                 auto_ptr<ModSetState> modSetState = modSet.prepare( obj );
                 ASSERT_FALSE( modSetState->canApplyInPlace() );
                 modSetState->createNewFromMods();
-                ASSERT_EQUALS( fromjson( "{ $set:{ 'a.b':[ 1 ] }, $set:{ 'a.c':[ 1 ] } }" ),
+                ASSERT_EQUALS( fromjson( "{ $set:{ 'a.b':[ 1 ] , 'a.c':[ 1 ] } }" ),
                                modSetState->getOpLogRewrite() );
             }
         };
@@ -2160,7 +2204,7 @@ namespace UpdateTests {
                                 auto_ptr<ModSetState> modSetState = modSet.prepare( obj );
                 ASSERT_FALSE( modSetState->canApplyInPlace() );
                 modSetState->createNewFromMods();
-                ASSERT_EQUALS( BSON( "$unset" << BSON( "a" << 1 ) << "$set" << BSON ( "b" << 100 ) ),
+                ASSERT_EQUALS( BSON( "$set" << BSON( "b" << 100 ) << "$unset" << BSON ( "a" << 1 ) ),
                                modSetState->getOpLogRewrite() );
             }
         };
@@ -2174,7 +2218,7 @@ namespace UpdateTests {
                                 auto_ptr<ModSetState> modSetState = modSet.prepare( obj );
                 ASSERT_FALSE( modSetState->canApplyInPlace() );
                 modSetState->createNewFromMods();
-                ASSERT_EQUALS( BSON( "$unset" << BSON( "a" << 1 ) << "$set" << BSON ( "b" << 100 ) ),
+                ASSERT_EQUALS( BSON( "$set" << BSON( "b" << 100 ) << "$unset" << BSON ( "a" << 1 ) ),
                                modSetState->getOpLogRewrite() );
             }
         };
@@ -2233,6 +2277,18 @@ namespace UpdateTests {
                 modSetState->createNewFromMods();
                 ASSERT_EQUALS( BSON( "$unset" << BSON( "a" << 1 ) ),
                                modSetState->getOpLogRewrite() );
+            }
+        };
+
+        class MultiSets {
+        public:
+            void run() {
+                BSONObj obj = BSON( "_id" << 1 << "a" << 1 << "b" << 1 );
+                BSONObj mod = BSON( "$set" << BSON( "a" << 2 << "b" << 2 ) );
+                ModSet modSet( mod );
+                auto_ptr<ModSetState> modSetState = modSet.prepare( obj );
+                ASSERT_TRUE( modSetState->canApplyInPlace() );
+                ASSERT_EQUALS( mod, modSetState->getOpLogRewrite() );
             }
         };
 
@@ -2304,6 +2360,19 @@ namespace UpdateTests {
                 // No positional operator validation is performed if a ModSet is 'forReplication',
                 // even after an attempt to fix the positional operator fields.
                 fixedMods->prepare( querySpec ); // Does not throw.
+            }
+        };
+
+        class CreateNewFromQueryExcludeNot {
+        public:
+            void run() {
+                BSONObj querySpec = BSON( "a" << BSON( "$not" << BSON( "$lt" << 1 ) ) );
+                BSONObj modSpec = BSON( "$set" << BSON( "b" << 1 ) );
+                ModSet modSet( modSpec );
+
+                // Because a $not operator is applied to the 'a' field, the 'a' field is excluded
+                // from the resulting document.
+                ASSERT_EQUALS( BSON( "b" << 1 ), modSet.createNewFromQuery( querySpec ) );
             }
         };
     };
@@ -2586,6 +2655,8 @@ namespace UpdateTests {
             add< CantPushTwice >();
             add< SetEncapsulationConflictsWithExistingType >();
             add< CantPushToParent >();
+            add< PushEachSimple >();
+            add< PushEachFromEmpty >();
             add< PushSliceBelowFull >();
             add< PushSliceReachedFullExact >();
             add< PushSliceReachedFullWithEach >();
@@ -2691,11 +2762,13 @@ namespace UpdateTests {
             // add< ModSetTests::BitRewriteNonExistingField >();
             add< ModSetTests::SetIsNotRewritten >();
             add< ModSetTests::UnsetIsNotRewritten >();
+            add< ModSetTests::MultiSets >();
             add< ModSetTests::PositionalWithoutElemMatchKey >();
             add< ModSetTests::PositionalWithoutNestedElemMatchKey >();
             add< ModSetTests::DbrefPassesPositionalValidation >();
             add< ModSetTests::NoPositionalValidationOnReplication >();
             add< ModSetTests::NoPositionalValidationOnPartialFixedArrayReplication >();
+            add< ModSetTests::CreateNewFromQueryExcludeNot >();
 
             add< basic::inc1 >();
             add< basic::inc2 >();

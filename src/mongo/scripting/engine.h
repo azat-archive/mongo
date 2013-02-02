@@ -25,8 +25,6 @@ namespace mongo {
 
     class DBClientWithCommands;
 
-    static const unsigned kMaxJsFileLength = std::numeric_limits<unsigned>::max() - 1;
-
     struct JSFile {
         const char* name;
         const StringData& source;
@@ -72,6 +70,8 @@ namespace mongo {
         virtual string getError() = 0;
 
         virtual bool hasOutOfMemoryException() = 0;
+
+        virtual void installBenchRun();
 
         virtual bool isKillPending() const = 0;
 

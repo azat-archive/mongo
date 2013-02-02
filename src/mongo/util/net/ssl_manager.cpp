@@ -105,7 +105,7 @@ namespace mongo {
 
     SSLManager::SSLManager(const SSLParams& params) : 
         _validateCertificates(false),
-        _forceValidation(params.forceCertificateValidation) {
+        _weakValidation(params.weakCertificateValidation) {
         SSL_library_init();
         SSL_load_error_strings();
         ERR_load_crypto_strings();
@@ -237,9 +237,22 @@ namespace mongo {
         return ssl;
     }
 
+    int SSLManager::_ssl_connect(SSL* ssl) {
+        for (int i=0; i<3; ++i) {
+            int ret = SSL_connect(ssl);
+            if (ret == 1) 
+                return ret;
+            int code = SSL_get_error(ssl, ret);
+            // Call SSL_connect again if we get SSL_ERROR_WANT_READ;
+            // otherwise return error to caller.
+            if (code != SSL_ERROR_WANT_READ)
+                return ret;
+        }
+        fassertFailed(16697);
+    }
     SSL* SSLManager::connect(int fd) {
         SSL* ssl = _secure(fd);
-        int ret = SSL_connect(ssl);
+        int ret = _ssl_connect(ssl);
         if (ret != 1)
             _handleSSLError(SSL_get_error(ssl, ret));
         return ssl;
@@ -259,12 +272,12 @@ namespace mongo {
         X509* cert = SSL_get_peer_certificate(ssl);
 
         if (cert == NULL) { // no certificate presented by peer
-            if (_forceValidation) {
-                error() << "no SSL certificate provided by peer; connection rejected" << endl;
-                throw SocketException(SocketException::CONNECT_ERROR, "");
+            if (_weakValidation) {
+                warning() << "no SSL certificate provided by peer" << endl;
             }
             else {
-                error() << "no SSL certificate provided by peer" << endl;
+                error() << "no SSL certificate provided by peer; connection rejected" << endl;
+                throw SocketException(SocketException::CONNECT_ERROR, "");
             }
             return;
         }
@@ -281,6 +294,10 @@ namespace mongo {
         // TODO: check optional cipher restriction, using cert.
     }
 
+    void SSLManager::cleanupThreadLocals() {
+        ERR_remove_state(0);
+    }
+
     std::string SSLManager::_getSSLErrorMessage(int code) {
         // 120 from the SSL documentation for ERR_error_string
         static const size_t msglen = 120;
@@ -295,8 +312,8 @@ namespace mongo {
         case SSL_ERROR_WANT_READ:
         case SSL_ERROR_WANT_WRITE:
             // should not happen because we turned on AUTO_RETRY
-            error() << "SSL error" << endl;
-            throw SocketException(SocketException::CONNECT_ERROR, "");
+            error() << "SSL error: " << code << endl;
+            fassertFailed( 16676 );
             break;
 
         case SSL_ERROR_SYSCALL:

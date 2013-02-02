@@ -217,7 +217,8 @@ class mongod(object):
         if self.kwargs.get('use_ssl'):
             argv += ['--sslOnNormalPorts',
                      '--sslPEMKeyFile', 'jstests/libs/server.pem',
-                     '--sslCAFile', 'jstests/libs/ca.pem']
+                     '--sslCAFile', 'jstests/libs/ca.pem',
+                     '--sslWeakCertificateValidation']
         
         print "running " + " ".join(argv)
         self.proc = self._start(buildlogger(argv, is_global=True))
@@ -356,7 +357,7 @@ def skipTest(path):
     parentPath = os.path.dirname(path)
     parentDir = os.path.basename(parentPath)
     if small_oplog: # For tests running in parallel
-        if basename in ["cursor8.js", "indexh.js", "dropdb.js"]:
+        if basename in ["cursor8.js", "indexh.js", "dropdb.js", "connections_opened.js"]:
             return True
     if auth or keyFile: # For tests running with auth
         # Skip any tests that run with auth explicitly
@@ -371,16 +372,17 @@ def skipTest(path):
         if parentDir == "disk": # SERVER-7356
             return True
 
-        authTestsToSkip = [("sharding", "read_pref_rs_client.js"), # SERVER-6972
+        authTestsToSkip = [("sharding", "gle_with_conf_servers.js"), # SERVER-6972
+                           ("sharding", "read_pref_cmd.js"), # SERVER-6972
+                           ("sharding", "read_pref_rs_client.js"), # SERVER-6972
                            ("sharding", "sync_conn_cmd.js"), #SERVER-6327
-                           ("sharding", "gle_with_conf_servers.js"), # SERVER-6972
-                           ("jstests", "copydb.js"), # SERVER-7864
                            ("sharding", "sync3.js"), # SERVER-6388 for this and those below
                            ("sharding", "sync6.js"),
                            ("sharding", "parallel.js"),
                            ("jstests", "bench_test1.js"),
                            ("jstests", "bench_test2.js"),
-                           ("jstests", "bench_test3.js")]
+                           ("jstests", "bench_test3.js"),
+                           ("jstests", "max_message_size.js")] # SERVER-8414
 
         if os.path.join(parentDir,basename) in [ os.path.join(*test) for test in authTestsToSkip ]:
             return True

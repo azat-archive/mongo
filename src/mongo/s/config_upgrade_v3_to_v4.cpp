@@ -54,7 +54,7 @@ namespace mongo {
     static const char* minMongoProcessVersion = "2.2";
 
     // Custom field used in upgrade state to determine if/where we failed on last upgrade
-    const BSONField<bool> inCriticalSectionField(string("inCriticalSection"));
+    const BSONField<bool> inCriticalSectionField(string("inCriticalSection"), false);
 
     bool _cleanupUpgradeState(const ConnectionString& configLoc,
                               const OID& lastUpgradeId,
@@ -125,7 +125,7 @@ namespace mongo {
 
         verify(lastVersionInfo.getCurrentVersion() == UpgradeHistory_NoEpochVersion);
 
-        if (lastVersionInfo.getUpgradeId().isSet()) {
+        if (lastVersionInfo.isUpgradeIdSet() && lastVersionInfo.getUpgradeId().isSet()) {
 
             //
             // Another upgrade failed, so cleanup may be necessary
@@ -136,7 +136,6 @@ namespace mongo {
             bool inCriticalSection;
             if (!FieldParser::extract(lastUpgradeState,
                                       inCriticalSectionField,
-                                      false,
                                       &inCriticalSection,
                                       errMsg))
             {
@@ -157,7 +156,12 @@ namespace mongo {
             }
 
             if (!_cleanupUpgradeState(configLoc, lastVersionInfo.getUpgradeId(), errMsg)) {
-                return false;
+                
+                // If we can't cleanup the old upgrade state, the user might have done it for us,
+                // not a fatal problem (we'll just end up with extra collections).
+                
+                warning() << "could not cleanup previous upgrade state" << causedBy(errMsg) << endl;
+                *errMsg = "";
             }
         }
 

@@ -1662,9 +1662,6 @@
     <ClInclude Include="..\db\fts\tokenizer.h">
       <Filter>db\fts</Filter>
     </ClInclude>
-    <ClInclude Include="..\db\ops\field_ref.h">
-      <Filter>db\ops</Filter>
-    </ClInclude>
     <ClInclude Include="..\db\ops\modifier_base.h">
       <Filter>db\ops</Filter>
     </ClInclude>
@@ -1682,6 +1679,27 @@
     </ClInclude>
     <ClInclude Include="..\db\stats\top.h">
       <Filter>db\stats</Filter>
+    </ClInclude>
+    <ClInclude Include="..\scripting\engine_v8.h">
+      <Filter>scripting</Filter>
+    </ClInclude>
+    <ClInclude Include="..\scripting\v8_db.h">
+      <Filter>scripting</Filter>
+    </ClInclude>
+    <ClInclude Include="..\scripting\v8_deadline_monitor.h">
+      <Filter>scripting</Filter>
+    </ClInclude>
+    <ClInclude Include="..\scripting\v8_utils.h">
+      <Filter>scripting</Filter>
+    </ClInclude>
+    <ClInclude Include="..\db\geo\geoquery.h">
+      <Filter>db\geo</Filter>
+    </ClInclude>
+    <ClInclude Include="..\scripting\v8_profiler.h">
+      <Filter>scripting</Filter>
+    </ClInclude>
+    <ClInclude Include="..\db\field_ref.h">
+      <Filter>db\Header Files\e to n</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -3295,11 +3313,41 @@
     <ClCompile Include="..\db\auth\auth_server_parameters.cpp">
       <Filter>db\auth</Filter>
     </ClCompile>
-    <ClCompile Include="..\db\ops\field_ref.cpp">
-      <Filter>db\ops</Filter>
-    </ClCompile>
     <ClCompile Include="..\db\stats\timer_stats.cpp">
       <Filter>db\stats</Filter>
+    </ClCompile>
+    <ClCompile Include="..\scripting\bson_template_evaluator_test.cpp">
+      <Filter>scripting</Filter>
+    </ClCompile>
+    <ClCompile Include="..\scripting\engine_none.cpp">
+      <Filter>scripting</Filter>
+    </ClCompile>
+    <ClCompile Include="..\scripting\engine_v8.cpp">
+      <Filter>scripting</Filter>
+    </ClCompile>
+    <ClCompile Include="..\scripting\v8_db.cpp">
+      <Filter>scripting</Filter>
+    </ClCompile>
+    <ClCompile Include="..\scripting\v8_deadline_monitor_test.cpp">
+      <Filter>scripting</Filter>
+    </ClCompile>
+    <ClCompile Include="..\scripting\v8_utils.cpp">
+      <Filter>scripting</Filter>
+    </ClCompile>
+    <ClCompile Include="..\db\geo\geoparser_test.cpp">
+      <Filter>db\geo</Filter>
+    </ClCompile>
+    <ClCompile Include="..\db\geo\geoquery.cpp">
+      <Filter>db\geo</Filter>
+    </ClCompile>
+    <ClCompile Include="..\db\geo\hash_test.cpp">
+      <Filter>db\geo</Filter>
+    </ClCompile>
+    <ClCompile Include="..\scripting\v8_profiler.cpp">
+      <Filter>scripting</Filter>
+    </ClCompile>
+    <ClCompile Include="..\db\field_ref.cpp">
+      <Filter>db\Source Files\e to n</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -3384,8 +3432,8 @@
     <None Include="..\db\fts\generate_stop_words.py">
       <Filter>db\fts</Filter>
     </None>
-    <None Include="..\db\ops\SConscript">
-      <Filter>db\ops</Filter>
+    <None Include="..\db\SConscript">
+      <Filter>db</Filter>
     </None>
   </ItemGroup>
 </Project>

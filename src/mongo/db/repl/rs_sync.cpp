@@ -30,6 +30,12 @@
 #include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/rs.h"
 #include "mongo/db/repl/rs_sync.h"
+#include "mongo/util/fail_point_service.h"
+#include "mongo/db/commands/server_status.h"
+#include "mongo/db/stats/timer_stats.h"
+#include "mongo/base/counter.h"
+
+
 
 namespace mongo {
 
@@ -37,6 +43,19 @@ namespace mongo {
     extern unsigned replSetForceInitialSyncFailure;
 
 namespace replset {
+
+    MONGO_FP_DECLARE(rsSyncApplyStop);
+
+    // Number and time of each ApplyOps worker pool round
+    static TimerStats applyBatchStats;
+    static ServerStatusMetricField<TimerStats> displayOpBatchesApplied(
+                                                    "repl.apply.batches",
+                                                    &applyBatchStats );
+    //The oplog entries applied
+    static Counter64 opsAppliedStats;
+    static ServerStatusMetricField<Counter64> displayOpsApplied( "repl.apply.ops",
+                                                                &opsAppliedStats );
+
 
     SyncTail::SyncTail(BackgroundSyncInterface *q) :
         Sync(""), oplogVersion(0), _networkQueue(q)
@@ -82,6 +101,7 @@ namespace replset {
         // For non-initial-sync, we convert updates to upserts
         // to suppress errors when replaying oplog entries.
         bool ok = !applyOperation_inlock(op, true, convertUpdateToUpsert);
+        opsAppliedStats.increment();
         getDur().commitIfNeeded();
 
         return ok;
@@ -194,6 +214,7 @@ namespace replset {
     void SyncTail::applyOps(const std::vector< std::vector<BSONObj> >& writerVectors, 
                                      MultiSyncApplyFunc applyFunc) {
         ThreadPool& writerPool = theReplSet->getWriterPool();
+        TimerHolder timer(&applyBatchStats);
         for (std::vector< std::vector<BSONObj> >::const_iterator it = writerVectors.begin();
              it != writerVectors.end();
              ++it) {
@@ -407,6 +428,11 @@ namespace replset {
                         break;
                     }
                 }
+            }
+
+            // For pausing replication in tests
+            while (MONGO_FAIL_POINT(rsSyncApplyStop)) {
+                sleepmillis(0);
             }
 
             const BSONObj& lastOp = ops.getDeque().back();
@@ -681,8 +707,10 @@ namespace replset {
             return;
         }
 
-        /* do we have anything at all? */
-        if (getMinValid().isNull() || lastOpTimeWritten.isNull()) {
+        // Check criteria for doing an initial sync:
+        // 1. If the oplog is empty, do an initial sync
+        // 2. If minValid has _initialSyncFlag set, do an initial sync
+        if (lastOpTimeWritten.isNull() || getInitialSyncFlag()) {
             syncDoInitialSync();
             return; // _syncThread will be recalled, starts from top again in case sync failed.
         }
